@@ -387,6 +387,7 @@ rutas.inicio = {
         <button class="action" data-go="cierre"><b>Cerrar jornada</b><span>Lecturas finales, diésel</span></button>
         <button class="action" data-go="gasto"><b>Registrar gasto</b><span>Con foto del soporte</span></button>
       </div>
+      ${veDinero() ? '<button class="action tablero-btn" data-go="tablero"><b>Tablero</b><span>Indicadores, resultado y liquidación</span></button>' : ''}
       <div class="card"><h2>Hoy</h2><ul class="list">${lineas || '<li class="muted">No tienes drones asignados.</li>'}</ul></div>
       ${esAdmin() ? `<div class="card"><h2>Administración</h2><ul class="list">
         <li><div><div class="t">Gastos por aprobar</div><div class="muted">Revisa soportes del aliado y pilotos</div></div><button class="btn small" data-go="aprobaciones">${pendientes}</button></li>

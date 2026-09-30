@@ -1,5 +1,5 @@
 // Service worker: guarda la app en el celular para que abra sin señal.
-const VERSION = 'colfog-agro-v0.2.0';
+const VERSION = 'colfog-agro-v0.2.1';
 const SHELL = [
   './', 'index.html', 'style.css', 'app.js', 'tablero.js', 'config.js',
   'vendor/supabase.js', 'manifest.webmanifest',
@@ -23,7 +23,7 @@ self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET' || url.origin !== self.location.origin) return; // Supabase va directo a la red
   // Red primero (para recibir actualizaciones), caché si no hay señal
   e.respondWith(
-    fetch(e.request)
+    fetch(e.request, { cache: 'no-cache' }) // siempre revisa si hay versión nueva
       .then((res) => {
         const copy = res.clone();
         caches.open(VERSION).then((c) => c.put(e.request, copy));
