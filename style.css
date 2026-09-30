@@ -125,3 +125,50 @@ textarea { min-height: 70px; }
 .footer-links { display: flex; justify-content: space-between; margin-top: 8px; }
 .linklike { background: none; border: 0; color: var(--brand); font: inherit; padding: 8px 0; }
 .img-thumb { width: 64px; height: 64px; object-fit: cover; border-radius: 8px; border: 1px solid var(--line); }
+
+/* ---------- Tablero ---------- */
+:root { --s-T55: #2a78d6; --s-T50: #eb6834; --grid: #e6e9e6; --axis: #b9c2bc; }
+@media (prefers-color-scheme: dark) { :root { --s-T55: #3987e5; --s-T50: #d95926; --grid: #26302a; --axis: #3c4841; } }
+.tablero-btn { width: 100%; min-height: 0; margin: 0 0 14px; border-color: var(--brand); }
+.filtros { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; margin-bottom: 6px; }
+.pill { flex: none; border: 1px solid var(--line); background: var(--card); color: var(--text); border-radius: 999px; padding: 8px 14px; font: inherit; font-size: 14px; }
+.pill.on { background: var(--brand); color: var(--brand-ink); border-color: var(--brand); }
+.periodo { margin: 4px 0 12px; }
+.hero { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; margin-bottom: 12px; display: flex; flex-direction: column; gap: 4px; }
+.hero strong { font-size: 40px; line-height: 1.1; font-weight: 650; }
+.hero strong.neg, .num.neg { color: var(--danger); }
+.tiles { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-bottom: 14px; }
+@media (min-width: 560px) { .tiles { grid-template-columns: repeat(4, 1fr); } }
+.tile { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; display: flex; flex-direction: column; gap: 2px; }
+.tile span { font-size: 13px; color: var(--muted); }
+.tile b { font-size: 24px; font-weight: 650; }
+.tile small { font-size: 12px; color: var(--muted); }
+.cols { display: grid; gap: 0 14px; }
+@media (min-width: 760px) { main:has(.hero) { max-width: 980px; } .cols { grid-template-columns: 1fr 1fr; } }
+.card h2 .sw { margin-right: 8px; }
+.sw { display: inline-block; width: 10px; height: 10px; border-radius: 3px; vertical-align: 0; }
+.s-T55 { fill: var(--s-T55); background: var(--s-T55); }
+.s-T50 { fill: var(--s-T50); background: var(--s-T50); }
+.legend { display: flex; gap: 14px; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.chart-wrap { position: relative; }
+.chart { width: 100%; height: auto; display: block; }
+.chart .grid { stroke: var(--grid); stroke-width: 1; }
+.chart .axis { stroke: var(--axis); stroke-width: 1; }
+.chart .tick { fill: var(--muted); font-size: 11px; }
+.chart .bar { cursor: default; }
+.chart .bar:hover { opacity: .85; }
+.chart-tip { position: absolute; pointer-events: none; background: var(--text); color: var(--bg); font-size: 13px; padding: 6px 9px; border-radius: 8px; white-space: nowrap; }
+.tabla-datos { margin-top: 8px; font-size: 14px; }
+.tabla-datos summary { color: var(--brand); cursor: pointer; }
+.tabla-datos table, table.pyg { width: 100%; border-collapse: collapse; font-size: 14px; }
+.tabla-datos td, .tabla-datos th, table.pyg td, table.pyg th { padding: 7px 0; border-bottom: 1px solid var(--line); text-align: left; }
+.tabla-datos td + td, .tabla-datos th + th { text-align: right; font-variant-numeric: tabular-nums; }
+table.pyg th { font-size: 12px; color: var(--muted); font-weight: 600; }
+table.pyg .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+table.pyg tr.sub td { font-weight: 600; }
+table.pyg tr.total td { font-weight: 700; border-bottom: 0; border-top: 2px solid var(--text); }
+.meter { height: 8px; border-radius: 999px; background: var(--brand-soft); overflow: hidden; margin: 6px 0 4px; }
+.meter span { display: block; height: 100%; background: var(--brand); border-radius: 999px; }
+.meter.warn { background: var(--warn-soft); } .meter.warn span { background: var(--warn); }
+.meter.danger { background: var(--danger-soft); } .meter.danger span { background: var(--danger); }

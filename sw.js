@@ -1,7 +1,7 @@
 // Service worker: guarda la app en el celular para que abra sin señal.
-const VERSION = 'colfog-agro-v0.1.0';
+const VERSION = 'colfog-agro-v0.2.0';
 const SHELL = [
-  './', 'index.html', 'style.css', 'app.js', 'config.js',
+  './', 'index.html', 'style.css', 'app.js', 'tablero.js', 'config.js',
   'vendor/supabase.js', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png'
 ];

@@ -1,4 +1,12 @@
 /* COLFOG Agro · fase 1 (registro de jornadas, trabajos y gastos con modo sin señal) */
+function mostrarFalla(msg) {
+  const v = document.getElementById('view');
+  if (v) v.innerHTML = '<div class="card"><h2>No se pudo abrir la app</h2><p class="note">' +
+    String(msg).replace(/[<>&]/g, '') + '</p><p class="muted">Ábrela desde su enlace web (https), no como archivo del computador.</p></div>';
+}
+window.addEventListener('error', (e) => mostrarFalla(e.message || 'Error desconocido'));
+window.addEventListener('unhandledrejection', (e) => mostrarFalla(e.reason?.message || e.reason || 'Error desconocido'));
+if (!window.supabase || !window.COLFOG_CONFIG) mostrarFalla('No cargaron los archivos vendor/supabase.js o config.js.');
 const CFG = window.COLFOG_CONFIG;
 const sb = window.supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_KEY, {
   auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: false }
@@ -835,6 +843,14 @@ if ('serviceWorker' in navigator) {
 }
 
 (async function arrancar() {
+  if (location.protocol === 'file:') {
+    mostrarFalla('Estás abriendo index.html como archivo. Para probarla, publícala en GitHub Pages (o en el dominio de COLFOG) y ábrela desde ese enlace.');
+    return;
+  }
+  if (!window.indexedDB || !window.crypto?.subtle) {
+    mostrarFalla('Este navegador no permite guardar datos sin señal. Usa Safari o Chrome actualizados.');
+    return;
+  }
   await cargarCache();
   const { data } = await sb.auth.getSession();
   const cached = await idb.get('user');
