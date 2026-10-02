@@ -127,8 +127,8 @@ textarea { min-height: 70px; }
 .img-thumb { width: 64px; height: 64px; object-fit: cover; border-radius: 8px; border: 1px solid var(--line); }
 
 /* ---------- Tablero ---------- */
-:root { --s-T55: #2a78d6; --s-T50: #eb6834; --grid: #e6e9e6; --axis: #b9c2bc; }
-@media (prefers-color-scheme: dark) { :root { --s-T55: #3987e5; --s-T50: #d95926; --grid: #26302a; --axis: #3c4841; } }
+:root { --s-T55: #2a78d6; --s-T50: #eb6834; --s-T55S: #1baf7a; --grid: #e6e9e6; --axis: #b9c2bc; }
+@media (prefers-color-scheme: dark) { :root { --s-T55: #3987e5; --s-T50: #d95926; --s-T55S: #199e70; --grid: #26302a; --axis: #3c4841; } }
 .tablero-btn { width: 100%; min-height: 0; margin: 0 0 14px; border-color: var(--brand); }
 .filtros { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; margin-bottom: 6px; }
 .pill { flex: none; border: 1px solid var(--line); background: var(--card); color: var(--text); border-radius: 999px; padding: 8px 14px; font: inherit; font-size: 14px; }
@@ -172,3 +172,5 @@ table.pyg tr.total td { font-weight: 700; border-bottom: 0; border-top: 2px soli
 .meter span { display: block; height: 100%; background: var(--brand); border-radius: 999px; }
 .meter.warn { background: var(--warn-soft); } .meter.warn span { background: var(--warn); }
 .meter.danger { background: var(--danger-soft); } .meter.danger span { background: var(--danger); }
+
+.s-T55S { fill: var(--s-T55S); background: var(--s-T55S); }

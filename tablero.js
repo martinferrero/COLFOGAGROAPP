@@ -43,7 +43,8 @@ function calcularTablero({ jornadas, gastos }) {
   const activoPorId = Object.fromEntries(S.activos.map((a) => [a.id, a]));
 
   const vacio = () => ({ ha: 0, ingreso: 0, costoDia: 0, camioneta: 0, diesel: 0, auxiliar: 0, gastos: 0, gastosSinAsignar: 0, depBaterias: 0, depGenerador: 0, ciclos: 0, horasGen: 0, dias: 0, km: 0, trabajos: [] });
-  const D = { T55: vacio(), T50: vacio() };
+  const D = Object.fromEntries(S.drones.map((d) => [d.id, vacio()]));
+  const prop = (id) => S.drones.find((d) => d.id === id)?.propietario;
   const trabajos = [];
   const porFechaDron = {}; // "fecha|dron" -> trabajos
 
@@ -93,15 +94,20 @@ function calcularTablero({ jornadas, gastos }) {
     porCategoria[g.categoria] = (porCategoria[g.categoria] || 0) + Number(g.valor);
     const d = D[g.dron_id]; if (!d) continue;
     d.gastos += Number(g.valor);
+    const dr = S.drones.find((x) => x.id === g.dron_id);
+    if (dr?.aliado_id && g.creado_por === dr.aliado_id) d.gastosPagadosAliado = (d.gastosPagadosAliado || 0) + Number(g.valor);
     const ts = porFechaDron[`${g.fecha}|${g.dron_id}`];
     const haTot = ts?.reduce((s, t) => s + t.ha, 0);
     if (ts && haTot) for (const t of ts) t.gastos += Number(g.valor) * t.ha / haTot;
     else d.gastosSinAsignar += Number(g.valor);
   }
 
-  // Liquidación del T50 por trabajo
+  // Liquidación de los drones del aliado (T50) por trabajo
   const L = { fijo: 0, variable: 0, ingreso: 0, parte: 0, trabajosPerdida: 0 };
-  for (const t of D.T50.trabajos) {
+  const idsAliado = S.drones.filter((d) => d.propietario === 'ALIADO').map((d) => d.id);
+  const idsColfog = S.drones.filter((d) => d.propietario === 'COLFOG').map((d) => d.id);
+  const idsComp = S.drones.filter((d) => d.propietario === 'COMPARTIDO').map((d) => d.id);
+  for (const t of idsAliado.flatMap((id) => D[id].trabajos)) {
     t.fijo = t.ha * fijoHa;
     t.utilidad = t.ingreso - t.costoDia - t.gastos - t.fijo;
     t.variable = Math.max(0, t.utilidad) * pctVar;
@@ -111,13 +117,33 @@ function calcularTablero({ jornadas, gastos }) {
   L.parte = L.ingreso - L.fijo - L.variable;
   L.retencion = L.parte * retAli;
   L.neto = L.parte - L.retencion;
-  const t50 = D.T50;
-  t50.utilidadCaja = t50.ingreso - t50.costoDia - t50.gastos - L.fijo - L.variable;
-  t50.utilidadEconomica = t50.utilidadCaja - t50.depBaterias - t50.depGenerador;
-  const t55 = D.T55;
-  t55.utilidadCaja = t55.ingreso - t55.costoDia - t55.gastos;
-  t55.utilidadEconomica = t55.utilidadCaja - t55.depBaterias - t55.depGenerador;
-  const colfog = t55.utilidadEconomica + L.fijo + L.variable;
+  for (const id of Object.keys(D)) {
+    const x = D[id];
+    x.fijo = 0; x.variable = 0;
+    if (prop(id) === 'ALIADO') for (const t of x.trabajos) { x.fijo += t.fijo; x.variable += t.variable; }
+    x.utilidadCaja = x.ingreso - x.costoDia - x.gastos - x.fijo - x.variable;
+    x.utilidadEconomica = x.utilidadCaja - x.depBaterias - x.depGenerador;
+  }
+  // Dron compartido 50/50: liquidación mensual, ganancias y pérdidas se compensan
+  const pctAli = P.participacion_aliado_compartido ?? 0.5;
+  const C = { ids: idsComp, ingreso: 0, utilidadCaja: 0, utilidadEconomica: 0, gastosPagadosAliado: 0 };
+  for (const id of idsComp) {
+    C.ingreso += D[id].ingreso; C.utilidadCaja += D[id].utilidadCaja; C.utilidadEconomica += D[id].utilidadEconomica;
+    C.gastosPagadosAliado += D[id].gastosPagadosAliado || 0;
+  }
+  C.parteAliado = C.utilidadCaja * pctAli;
+  C.parteColfog = C.utilidadCaja - C.parteAliado;
+  C.economicaAliado = C.utilidadEconomica * pctAli;
+  C.economicaColfog = C.utilidadEconomica - C.economicaAliado;
+  // A transferir al aliado: su 50% + reembolso de los gastos del compartido que él pagó
+  C.factura = C.parteAliado + C.gastosPagadosAliado;
+  C.retencion = Math.max(0, C.factura) * retAli;
+  C.neto = C.factura - C.retencion;
+  C.pctAli = pctAli;
+
+  const suma = (ids, k) => ids.reduce((s, id) => s + (D[id]?.[k] || 0), 0);
+  const colfog = suma(idsColfog, 'utilidadEconomica') + L.fijo + L.variable + C.economicaColfog;
+  const aliado = suma(idsAliado, 'utilidadEconomica') + C.economicaAliado;
 
   // Clientes
   const clientes = {};
@@ -126,7 +152,7 @@ function calcularTablero({ jornadas, gastos }) {
     c.ha += t.ha; c.ingreso += t.ingreso; c.n++;
   }
   return {
-    D, L, colfog, trabajos, pendientes, porCategoria,
+    D, L, C, colfog, aliado, idsColfog, idsAliado, idsComp, trabajos, pendientes, porCategoria,
     clientes: Object.values(clientes).sort((a, b) => b.ingreso - a.ingreso),
     sinPrecio: trabajos.filter((t) => t.sinPrecio).length,
     lecturasAbiertas: jornadas.flatMap((j) => (j.jornada_drones || []).flatMap((jd) => jd.lecturas || [])).filter((l) => l.fin == null).length
@@ -203,18 +229,26 @@ rutas.tablero = {
     let R;
     try { R = calcularTablero(await cargarTablero(desde, hasta)); }
     catch (e) { return filtros + `<div class="card"><p class="note">${esc(e.message)}</p></div>`; }
-    const { D, L } = R;
+    const { D, L, C } = R;
     const admin = esAdmin();
-    const drones = admin ? ['T55', 'T50'] : ['T50'];
+    const drones = admin ? S.drones.map((d) => d.id) : misDrones().map((d) => d.id);
+    const ordenProp = { COLFOG: 0, ALIADO: 1, COMPARTIDO: 2 };
+    drones.sort((x, y) => (ordenProp[S.drones.find((d) => d.id === x)?.propietario] ?? 9) - (ordenProp[S.drones.find((d) => d.id === y)?.propietario] ?? 9));
+    const nombreDron = (id) => {
+      const d = S.drones.find((x) => x.id === id);
+      const p = d?.propietario;
+      return `${id} · ${p === 'COLFOG' ? 'COLFOG' : p === 'ALIADO' ? 'Martin Ruiz' : `Sociedad ${Math.round((1 - C.pctAli) * 100)}/${Math.round(C.pctAli * 100)}`}`;
+    };
     const haTot = drones.reduce((s, d) => s + D[d].ha, 0);
     const ingTot = drones.reduce((s, d) => s + D[d].ingreso, 0);
     const diasTot = new Set(R.trabajos.filter((t) => drones.includes(t.dron)).map((t) => t.fecha)).size;
+    const hayComp = C.ids.some((id) => drones.includes(id));
 
     const hero = admin
       ? `<div class="hero"><span class="muted">Utilidad COLFOG línea drones</span><strong class="${R.colfog < 0 ? 'neg' : ''}">${money(R.colfog)}</strong>
-         <span class="muted">T55 ${money(D.T55.utilidadEconomica)} + aliado ${money(L.fijo + L.variable)} (fijo ${money(L.fijo)} + variable ${money(L.variable)})</span></div>`
-      : `<div class="hero"><span class="muted">Tu utilidad económica T50</span><strong class="${D.T50.utilidadEconomica < 0 ? 'neg' : ''}">${money(D.T50.utilidadEconomica)}</strong>
-         <span class="muted">Después de pagos a COLFOG, costos compartidos, gastos y desgaste de equipos</span></div>`;
+         <span class="muted">${R.idsColfog.map((id) => `${id} ${money(D[id].utilidadEconomica)}`).join(' + ')} + aliado ${money(L.fijo + L.variable)}${hayComp ? ` + 50% sociedad ${money(C.economicaColfog)}` : ''}</span></div>`
+      : `<div class="hero"><span class="muted">Tu utilidad económica</span><strong class="${R.aliado < 0 ? 'neg' : ''}">${money(R.aliado)}</strong>
+         <span class="muted">${R.idsAliado.map((id) => `${id} ${money(D[id].utilidadEconomica)}`).join(' + ')}${hayComp ? ` + tu 50% de la sociedad ${money(C.economicaAliado)}` : ''}. Incluye desgaste de equipos.</span></div>`;
 
     const tiles = `<div class="tiles">
       <div class="tile"><span>Hectáreas</span><b>${ha1(haTot)}</b><small>${diasTot} días de vuelo${diasTot ? ` · ${ha1(haTot / diasTot)} Ha/día` : ''}</small></div>
@@ -225,6 +259,7 @@ rutas.tablero = {
 
     const resultado = (d) => {
       const x = D[d];
+      const p = S.drones.find((z) => z.id === d)?.propietario;
       const rows = [
         filaR('Hectáreas', ha1(x.ha)),
         filaR('Ingresos', money(x.ingreso)),
@@ -232,26 +267,40 @@ rutas.tablero = {
         filaR('Diésel', '− ' + money(x.diesel)),
         filaR('Auxiliar de vuelo', '− ' + money(x.auxiliar)),
         filaR('Gastos aprobados', '− ' + money(x.gastos)),
-        ...(d === 'T50' ? [filaR('Fijo COLFOG ($5.000/Ha)', '− ' + money(L.fijo)), filaR('Variable COLFOG (7,5%)', '− ' + money(L.variable))] : []),
+        ...(p === 'ALIADO' ? [filaR('Fijo COLFOG ($5.000/Ha)', '− ' + money(x.fijo)), filaR('Variable COLFOG (7,5%)', '− ' + money(x.variable))] : []),
         filaR('Utilidad de caja', money(x.utilidadCaja), 'sub'),
         filaR(`Desgaste baterías (${ha1(x.ciclos)} ciclos)`, '− ' + money(x.depBaterias)),
         filaR(`Desgaste generador (${ha1(x.horasGen)} h)`, '− ' + money(x.depGenerador)),
         filaR('Utilidad económica', money(x.utilidadEconomica), 'total'),
-        filaR('Costo por Ha', x.ha ? money((x.ingreso - x.utilidadEconomica - (d === 'T50' ? L.fijo + L.variable : 0)) / x.ha) : '—')
+        ...(p === 'COMPARTIDO' ? [filaR(`COLFOG ${Math.round((1 - C.pctAli) * 100)}%`, money(x.utilidadEconomica * (1 - C.pctAli))), filaR(`Martin Ruiz ${Math.round(C.pctAli * 100)}%`, money(x.utilidadEconomica * C.pctAli))] : []),
+        filaR('Costo por Ha', x.ha ? money((x.ingreso - x.utilidadEconomica - x.fijo - x.variable) / x.ha) : '—')
       ].join('');
-      return `<div class="card"><h2><i class="sw s-${d}"></i>${d === 'T55' ? 'T55 · COLFOG' : 'T50 · Martin Ruiz'}</h2><table class="pyg">${rows}</table></div>`;
+      return `<div class="card"><h2><i class="sw s-${d}"></i>${esc(nombreDron(d))}</h2><table class="pyg">${rows}</table></div>`;
     };
 
-    const liquidacion = `<div class="card"><h2>Liquidación T50</h2>
+    const liquidacion = R.idsAliado.some((id) => drones.includes(id)) ? `<div class="card"><h2>Liquidación ${R.idsAliado.join(', ')} (por trabajo)</h2>
       <table class="pyg">
-        ${filaR('Ingresos facturables T50', money(L.ingreso))}
+        ${filaR('Ingresos facturables', money(L.ingreso))}
         ${filaR('Fijo COLFOG', '− ' + money(L.fijo))}
         ${filaR('Variable COLFOG', '− ' + money(L.variable))}
         ${filaR('Parte del aliado', money(L.parte), 'sub')}
         ${filaR('Retención 4%', '− ' + money(L.retencion))}
         ${filaR(admin ? 'Neto a pagar al aliado' : 'Neto a recibir', money(L.neto), 'total')}
       </table>
-      <p class="muted">Se paga a medida que los clientes pagan. ${L.trabajosPerdida ? `${L.trabajosPerdida} trabajo(s) con pérdida: pagan el fijo, sin variable.` : ''}</p></div>`;
+      <p class="muted">Se paga a medida que los clientes pagan. ${L.trabajosPerdida ? `${L.trabajosPerdida} trabajo(s) con pérdida: pagan el fijo, sin variable.` : ''}</p></div>` : '';
+
+    const liqComp = hayComp ? `<div class="card"><h2>Liquidación sociedad ${C.ids.join(', ')} (mensual)</h2>
+      <table class="pyg">
+        ${filaR('Ingresos', money(C.ingreso))}
+        ${filaR('Utilidad de caja del periodo', money(C.utilidadCaja), 'sub')}
+        ${filaR(`${Math.round(C.pctAli * 100)}% Martin Ruiz`, money(C.parteAliado))}
+        ${filaR('+ Reembolso gastos que pagó Martin Ruiz', money(C.gastosPagadosAliado))}
+        ${filaR('Factura de Martin Ruiz a COLFOG', money(C.factura), 'sub')}
+        ${C.factura > 0 ? filaR('Retención 4%', '− ' + money(C.retencion)) : ''}
+        ${filaR(C.factura >= 0 ? (admin ? 'Neto a pagar a Martin Ruiz' : 'Neto a recibir') : (admin ? 'Martin Ruiz debe aportar' : 'Debes aportar'), money(Math.abs(C.neto)), 'total')}
+        ${filaR(`${Math.round((1 - C.pctAli) * 100)}% COLFOG`, money(C.parteColfog))}
+      </table>
+      <p class="muted">Ganancias y pérdidas del mes se compensan y se reparten 50/50. Sin fijo ni variable. El desgaste de baterías y generador (${money(C.utilidadCaja - C.utilidadEconomica)}) también se reparte, pero no es caja: se usa para reponer equipos.</p></div>` : '';
 
     const clientes = `<div class="card"><h2>Principales clientes</h2><table class="pyg"><thead><tr><th>Cliente</th><th class="num">Ha</th><th class="num">Ingreso</th></tr></thead><tbody>
       ${R.clientes.slice(0, 8).map((c) => `<tr><td>${esc(c.cliente)}</td><td class="num">${ha1(c.ha)}</td><td class="num">${compacto(c.ingreso)}</td></tr>`).join('') || '<tr><td colspan="3" class="muted">Sin trabajos en el periodo</td></tr>'}
@@ -265,7 +314,7 @@ rutas.tablero = {
     const avisos = [
       R.sinPrecio && `${R.sinPrecio} trabajo(s) sin precio (faltan litros/Ha o paquete): cuentan con ingreso $0.`,
       R.lecturasAbiertas && `${R.lecturasAbiertas} lectura(s) sin cierre: su desgaste aún no se cuenta.`,
-      admin && 'No incluye salario del piloto del T55 ni el costo fijo de camioneta y auxiliar en días sin vuelo.'
+      admin && 'No incluye salarios de pilotos ni el costo fijo de camioneta y auxiliar en días sin vuelo.'
     ].filter(Boolean).map((t) => `<p class="note">${t}</p>`).join('');
 
     return `${filtros}
@@ -274,6 +323,7 @@ rutas.tablero = {
       <div class="card"><h2>Hectáreas por ${Math.round((new Date(hasta) - new Date(desde)) / 864e5) <= 34 ? 'día' : 'semana'}</h2>${graficoHa(R.trabajos, desde, hasta, drones)}</div>
       <div class="cols">${drones.map(resultado).join('')}</div>
       ${liquidacion}
+      ${liqComp}
       <div class="cols">${clientes}${gastosCat}</div>
       ${equipos}
       ${avisos}
