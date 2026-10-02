@@ -109,6 +109,7 @@ const S = {
   lecIni: {},      // lectura_id -> inicio registrado en el servidor
   jornadas: [],    // jornadas recientes del servidor (con drones y trabajos)
   gastos: [],
+  checklists: [],
   syncing: false
 };
 const esAdmin = () => S.perfil?.rol === 'admin';
@@ -119,7 +120,7 @@ function misDrones() {
   if (esAliado()) return S.drones.filter((d) => d.aliado_id === S.user?.id);
   return S.drones; // piloto: puede registrar cualquiera
 }
-const dronPorDefecto = () => (esAliado() ? misDrones()[0]?.id : 'T55');
+const dronPorDefecto = () => (esAliado() ? (misDrones().find((d) => d.propietario === 'ALIADO') || misDrones()[0])?.id : 'T55');
 
 /* ------------------------------------------------------------------ */
 /* Cola: encolar y sincronizar                                         */
@@ -201,7 +202,7 @@ async function pintarSync() {
 /* Carga de datos (servidor → caché)                                   */
 /* ------------------------------------------------------------------ */
 async function cargarCache() {
-  for (const k of ['perfil', 'drones', 'activos', 'precios', 'parametros', 'perfiles', 'ultimas', 'lecIni', 'jornadas', 'gastos']) {
+  for (const k of ['perfil', 'drones', 'activos', 'precios', 'parametros', 'perfiles', 'ultimas', 'lecIni', 'jornadas', 'gastos', 'checklists']) {
     const v = await idb.get(k);
     if (v !== undefined) S[k] = v;
   }
@@ -230,11 +231,13 @@ async function cargarDatos() {
     }
 
     const desde = new Date(Date.now() - 45 * 864e5).toISOString().slice(0, 10);
-    const [jor, lec, gas] = await Promise.all([
+    const [jor, lec, gas, chk] = await Promise.all([
       sb.from('jornadas').select('*, jornada_drones(*, trabajos(*))').gte('fecha', desde).order('fecha', { ascending: false }),
       sb.from('lecturas').select('id,activo_id,inicio,fin').limit(5000),
-      sb.from('gastos').select('*').gte('fecha', desde).order('fecha', { ascending: false }).limit(300)
+      sb.from('gastos').select('*').gte('fecha', desde).order('fecha', { ascending: false }).limit(300),
+      sb.from('checklists').select('*').gte('fecha', desde).order('created_at', { ascending: false }).limit(300)
     ]);
+    if (!chk.error) S.checklists = chk.data || [];
     S.jornadas = jor.data || [];
     S.gastos = gas.data || [];
     const ult = { ...S.ultimas };
@@ -247,7 +250,7 @@ async function cargarDatos() {
     for (const a of S.activos) if (a.lectura_inicial != null && ult[a.id] == null) ult[a.id] = Number(a.lectura_inicial);
     S.ultimas = ult;
 
-    for (const k of ['perfil', 'drones', 'activos', 'precios', 'parametros', 'perfiles', 'ultimas', 'lecIni', 'jornadas', 'gastos']) await idb.set(k, S[k]);
+    for (const k of ['perfil', 'drones', 'activos', 'precios', 'parametros', 'perfiles', 'ultimas', 'lecIni', 'jornadas', 'gastos', 'checklists']) await idb.set(k, S[k]);
   } catch (e) {
     if (!esErrorDeRed(e)) console.warn('cargarDatos', e);
   }
@@ -373,14 +376,18 @@ rutas.inicio = {
     const f = hoy();
     const { drones } = await estadoDia(f);
     const mis = misDrones();
+    const chkLocal = (await idb.get('chk:' + f)) || {};
     const lineas = mis.map((d) => {
       const e = drones[d.id];
       const estado = !e ? '<span class="badge warn">Sin iniciar</span>' : e.cerrada ? '<span class="badge">Cerrada</span>' : '<span class="badge">En curso</span>';
-      return `<li><div><div class="t">${esc(d.nombre)}</div></div>${estado}</li>`;
+      const ck = checklistDe(f, d.id, chkLocal);
+      const ckTxt = !ck ? '<span class="muted">Checklist pendiente</span>' : ck.completo ? '<span class="muted">✓ Checklist completo</span>' : `<span class="muted">⚠ Checklist: faltó ${esc(faltantes(ck).join(', '))}</span>`;
+      return `<li><div><div class="t">${esc(d.nombre)}</div>${ckTxt}</div>${estado}</li>`;
     }).join('');
     const pendientes = S.gastos.filter((g) => g.estado === 'pendiente').length;
     return `
       <div class="hello"><span class="muted">${esc(fechaLarga(f))}</span><strong>Hola, ${esc((S.perfil?.nombre || S.user?.email || '').split(' ')[0])}</strong></div>
+      <button class="action checklist-btn" data-go="checklist"><b>✓ Checklist de salida</b><span>Verifica equipos e insumos antes de salir al trabajo</span></button>
       <div class="grid-actions">
         <button class="action primary" data-go="jornada"><b>Iniciar jornada</b><span>Km, baterías, generador</span></button>
         <button class="action" data-go="trabajo"><b>Registrar trabajo</b><span>Cliente, Ha, litros</span></button>
@@ -455,7 +462,7 @@ async function asegurarJornada(fecha, dron, extra = {}) {
   // El admin puede completar datos de camioneta de una jornada creada por otro
   await encolar({ op: 'upsert', table: 'jornadas', row, ignore: !esAdmin() || !Object.keys(extra).length }, `Jornada ${fecha}`);
   const d = S.drones.find((x) => x.id === dron);
-  const piloto = esAdmin() && d?.aliado_id ? d.aliado_id : S.user.id;
+  const piloto = esAdmin() && d?.propietario === 'ALIADO' && d.aliado_id ? d.aliado_id : S.user.id;
   await encolar({ op: 'upsert', table: 'jornada_drones', row: { id: jdId, jornada_id: jid, dron_id: dron, piloto_id: piloto }, ignore: true }, `${dron} en jornada ${fecha}`);
   const dia = (await idb.get('dia:' + fecha)) || { drones: {} };
   dia.drones[dron] = { ...(dia.drones[dron] || {}), iniciada: true, jdId };
@@ -475,7 +482,8 @@ rutas.jornada = {
         <input id="fecha" type="date" value="${hoy()}" required>
         <label>Drones que salen hoy</label>
         <div class="chips">${mis.map((d) => `<label class="chip"><input type="checkbox" name="dron" value="${d.id}" ${d.id === def ? 'checked' : ''}>${esc(d.id)}</label>`).join('')}</div>
-        ${esAdmin() ? '<p class="muted">Si salen los dos drones, márcalos ambos: la camioneta y el auxiliar se reparten 50/50.</p>' : ''}
+        ${esAdmin() ? '<p class="muted">Marca todos los drones que salen: la camioneta y el auxiliar se reparten entre ellos.</p>' : ''}
+        <div id="aviso-chk"></div>
       </div>
       <div class="card">
         <h2>Camioneta y auxiliar</h2>
@@ -492,8 +500,12 @@ rutas.jornada = {
     </form>`;
   },
   init: () => {
-    const pintar = () => {
+    const pintar = async () => {
       const sel = $$('input[name=dron]:checked').map((i) => i.value);
+      const loc = (await idb.get('chk:' + $('#fecha').value)) || {};
+      const sinChk = sel.filter((d) => !checklistDe($('#fecha').value, d, loc));
+      $('#aviso-chk').innerHTML = sinChk.length ? `<p class="note">Falta el checklist de salida de ${esc(sinChk.join(', '))}. <button type="button" class="linklike" data-go-chk>Hacerlo ahora</button></p>` : '';
+      $('[data-go-chk]')?.addEventListener('click', () => ir('checklist'));
       $('#lecturas').innerHTML = sel.map((d) => `<div class="card" data-dron="${d}"><h2>${esc(d)} · lecturas de inicio</h2>${bloqueLecturas(d, 'inicio')}</div>`).join('');
     };
     $$('input[name=dron]').forEach((i) => i.addEventListener('change', pintar));
@@ -749,6 +761,76 @@ rutas.gasto = {
 };
 
 /* ------------------------------------------------------------------ */
+/* Vista: checklist de salida                                          */
+/* ------------------------------------------------------------------ */
+const CHECKLIST = [
+  ['dron', 'Dron'], ['generador', 'Generador'], ['baterias', 'Baterías'], ['baterias_rtk', 'Baterías RTK'],
+  ['rtk_tripode', 'RTK + trípode'], ['relay', 'Relay'], ['cargadores', 'Cargadores'], ['control', 'Control'],
+  ['gasolina', 'Gasolina'], ['aditivo', 'Aditivo'], ['diesel', 'Diésel'], ['sillas', 'Sillas']
+];
+const faltantes = (c) => CHECKLIST.filter(([k]) => !c.items?.[k]).map(([, t]) => t);
+function checklistDe(fecha, dron, local = {}) {
+  return local[dron] || S.checklists.find((c) => c.fecha === fecha && c.dron_id === dron);
+}
+rutas.checklist = {
+  titulo: 'Checklist de salida',
+  html: () => {
+    const mis = misDrones();
+    const def = dronPorDefecto();
+    return `<form id="f-ck">
+      <div class="card">
+        <label for="fecha">Fecha</label>
+        <input id="fecha" type="date" value="${hoy()}" required>
+        <label>Dron(es)</label>
+        <div class="chips">${mis.map((d) => `<label class="chip"><input type="checkbox" name="dron" value="${d.id}" ${d.id === def ? 'checked' : ''}>${esc(d.id)}</label>`).join('')}</div>
+      </div>
+      <div class="card">
+        <div class="ck-head"><h2>Verifica que lleves</h2><button type="button" class="linklike" id="ck-todo">Marcar todo</button></div>
+        <div class="ck-list">${CHECKLIST.map(([k, t]) => `<label class="ck-item"><input type="checkbox" name="item" value="${k}"><span>${t}</span></label>`).join('')}</div>
+        <p class="muted" id="ck-cuenta"></p>
+        <label for="notas">Notas</label>
+        <textarea id="notas" placeholder="Ej: falta un cargador, se lleva el de repuesto"></textarea>
+      </div>
+      <button class="btn" type="submit">Guardar checklist</button>
+    </form>`;
+  },
+  init: () => {
+    const cuenta = () => {
+      const n = $$('input[name=item]:checked').length;
+      $('#ck-cuenta').textContent = n === CHECKLIST.length ? 'Todo listo ✓' : `${n} de ${CHECKLIST.length} verificados`;
+    };
+    $$('input[name=item]').forEach((i) => i.addEventListener('change', cuenta));
+    $('#ck-todo').addEventListener('click', () => { $$('input[name=item]').forEach((i) => (i.checked = true)); cuenta(); });
+    cuenta();
+    $('#f-ck').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const fecha = $('#fecha').value;
+      const drones = $$('input[name=dron]:checked').map((i) => i.value);
+      if (!drones.length) return toast('Marca el dron');
+      const items = Object.fromEntries(CHECKLIST.map(([k]) => [k, !!$(`input[name=item][value="${k}"]`).checked]));
+      const completo = Object.values(items).every(Boolean);
+      const notas = $('#notas').value.trim() || null;
+      if (!completo) {
+        const f = CHECKLIST.filter(([k]) => !items[k]).map(([, t]) => t).join(', ');
+        if (!confirm(`Falta: ${f}.\n\n¿Guardar el checklist así?`)) return;
+      }
+      const local = (await idb.get('chk:' + fecha)) || {};
+      for (const dron of drones) {
+        const row = { id: uuid(), fecha, dron_id: dron, items, completo, notas };
+        await encolar({ op: 'upsert', table: 'checklists', row, ignore: true }, `Checklist ${dron} ${fecha}`);
+        local[dron] = row;
+      }
+      await idb.set('chk:' + fecha, local);
+      toast(completo ? 'Checklist completo ✓' : 'Checklist guardado con faltantes');
+      const dia = (await idb.get('dia:' + fecha)) || { drones: {} };
+      const yaIniciada = drones.every((d) => dia.drones[d]?.iniciada);
+      pila = [{ nombre: 'inicio', params: {} }];
+      ir(yaIniciada ? 'inicio' : 'jornada', {}, yaIniciada);
+    });
+  }
+};
+
+/* ------------------------------------------------------------------ */
 /* Vistas de consulta                                                  */
 /* ------------------------------------------------------------------ */
 rutas.registros = {
@@ -760,6 +842,7 @@ rutas.registros = {
       const km = j.odometro_fin != null && j.odometro_ini != null ? j.odometro_fin - j.odometro_ini : null;
       return `<div class="card"><h2>${esc(fechaLarga(j.fecha))}</h2>
         <p class="muted">Drones: ${(j.jornada_drones || []).map((x) => x.dron_id).join(' + ') || '—'}${km != null ? ` · ${km} km` : ''}${veDinero() && j.diesel_valor ? ` · Diésel ${money(j.diesel_valor)}` : ''}${j.auxiliar ? ' · Con auxiliar' : ''}</p>
+        ${S.checklists.filter((c) => c.fecha === j.fecha && (esAdmin() || misDrones().some((d) => d.id === c.dron_id))).map((c) => `<p class="muted">Checklist ${esc(c.dron_id)}: ${c.completo ? '✓ completo' : '⚠ faltó ' + esc(faltantes(c).join(', '))}${c.notas ? ' · ' + esc(c.notas) : ''}</p>`).join('')}
         <ul class="list">${jds.flatMap((jd) => (jd.trabajos || []).map((t) => `<li><div><div class="t">${esc(t.cliente)}${t.finca ? ' · ' + esc(t.finca) : ''}</div>
           <div class="muted">${esc(jd.dron_id)} · ${esc(t.cultivo || '')} · ${t.litros_ha ? esc(t.litros_ha) + ' L/Ha' : esc(t.tipo_servicio)}</div></div>
           <span class="badge">${esc(t.ha)} Ha</span></li>`)).join('') || '<li class="muted">Sin trabajos registrados</li>'}</ul></div>`;

@@ -174,3 +174,12 @@ table.pyg tr.total td { font-weight: 700; border-bottom: 0; border-top: 2px soli
 .meter.danger { background: var(--danger-soft); } .meter.danger span { background: var(--danger); }
 
 .s-T55S { fill: var(--s-T55S); background: var(--s-T55S); }
+
+/* ---------- Checklist ---------- */
+.checklist-btn { width: 100%; min-height: 0; margin: 0 0 12px; border-color: var(--brand); background: var(--brand-soft); }
+.ck-head { display: flex; justify-content: space-between; align-items: center; }
+.ck-head h2 { margin: 0; }
+.ck-list { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
+.ck-item { display: flex; align-items: center; gap: 10px; margin: 0; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); font-weight: 500; min-height: 50px; }
+.ck-item input { width: 22px; height: 22px; min-height: 0; margin: 0; flex: none; accent-color: var(--brand); }
+.ck-item:has(input:checked) { border-color: var(--brand); background: var(--brand-soft); }
