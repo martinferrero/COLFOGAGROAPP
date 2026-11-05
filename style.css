@@ -183,3 +183,10 @@ table.pyg tr.total td { font-weight: 700; border-bottom: 0; border-top: 2px soli
 .ck-item { display: flex; align-items: center; gap: 10px; margin: 0; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); font-weight: 500; min-height: 50px; }
 .ck-item input { width: 22px; height: 22px; min-height: 0; margin: 0; flex: none; accent-color: var(--brand); }
 .ck-item:has(input:checked) { border-color: var(--brand); background: var(--brand-soft); }
+
+/* ---------- Duplicados ---------- */
+.modal-bg { position: fixed; inset: 0; z-index: 30; background: rgba(0, 0, 0, .5); display: flex; align-items: flex-end; justify-content: center; padding: 16px; padding-bottom: calc(16px + env(safe-area-inset-bottom)); }
+.modal { width: 100%; max-width: 520px; max-height: 85vh; overflow-y: auto; background: var(--card); color: var(--text); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px; }
+.modal h2 { margin: 0 0 8px; font-size: 18px; }
+.modal-btns .btn { margin-top: 10px; }
+.stack { display: flex; flex-direction: column; gap: 6px; align-items: flex-end; }

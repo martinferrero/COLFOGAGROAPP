@@ -28,7 +28,8 @@ async function cargarTablero(desde, hasta) {
   ]);
   if (jor.error) throw jor.error;
   if (gas.error) throw gas.error;
-  return { jornadas: jor.data || [], gastos: gas.data || [] };
+  // Lo anulado (duplicados) no cuenta en ingresos, costos ni liquidación
+  return { jornadas: (jor.data || []).map(sinAnulados), gastos: (gas.data || []).filter((g) => !g.anulado) };
 }
 
 function calcularTablero({ jornadas, gastos }) {

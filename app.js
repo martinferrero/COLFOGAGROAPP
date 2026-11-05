@@ -26,6 +26,8 @@ const hoy = () => {
 };
 const fechaLarga = (iso) => new Date(iso + 'T12:00:00').toLocaleDateString('es-CO', { weekday: 'long', day: 'numeric', month: 'long' });
 const soloDigitos = (s) => Number(String(s ?? '').replace(/[^\d]/g, '')) || 0;
+// Texto comparable: sin tildes, mayúsculas ni espacios de más ("Finca  La Esperanza" = "finca la esperanza")
+const norm = (s) => String(s ?? '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\s+/g, ' ').trim();
 const num = (s) => {
   if (s === '' || s == null) return null;
   const n = Number(String(s).replace(',', '.'));
@@ -110,6 +112,7 @@ const S = {
   jornadas: [],    // jornadas recientes del servidor (con drones y trabajos)
   gastos: [],
   checklists: [],
+  dupRev: [],      // grupos que el admin marcó como "no son duplicados"
   syncing: false
 };
 const esAdmin = () => S.perfil?.rol === 'admin';
@@ -202,7 +205,7 @@ async function pintarSync() {
 /* Carga de datos (servidor → caché)                                   */
 /* ------------------------------------------------------------------ */
 async function cargarCache() {
-  for (const k of ['perfil', 'drones', 'activos', 'precios', 'parametros', 'perfiles', 'ultimas', 'lecIni', 'jornadas', 'gastos', 'checklists']) {
+  for (const k of ['perfil', 'drones', 'activos', 'precios', 'parametros', 'perfiles', 'ultimas', 'lecIni', 'jornadas', 'gastos', 'checklists', 'dupRev']) {
     const v = await idb.get(k);
     if (v !== undefined) S[k] = v;
   }
@@ -238,8 +241,12 @@ async function cargarDatos() {
       sb.from('checklists').select('*').gte('fecha', desde).order('created_at', { ascending: false }).limit(300)
     ]);
     if (!chk.error) S.checklists = chk.data || [];
-    S.jornadas = jor.data || [];
-    S.gastos = gas.data || [];
+    S.jornadas = (jor.data || []).map(sinAnulados);   // lo anulado no se muestra ni cuenta
+    S.gastos = (gas.data || []).filter((g) => !g.anulado);
+    if (esAdmin()) {
+      const rev = await sb.from('duplicados_revisados').select('clave');
+      if (!rev.error) S.dupRev = (rev.data || []).map((x) => x.clave);
+    }
     const ult = { ...S.ultimas };
     S.lecIni = {};
     for (const l of lec.data || []) {
@@ -250,7 +257,7 @@ async function cargarDatos() {
     for (const a of S.activos) if (a.lectura_inicial != null && ult[a.id] == null) ult[a.id] = Number(a.lectura_inicial);
     S.ultimas = ult;
 
-    for (const k of ['perfil', 'drones', 'activos', 'precios', 'parametros', 'perfiles', 'ultimas', 'lecIni', 'jornadas', 'gastos', 'checklists']) await idb.set(k, S[k]);
+    for (const k of ['perfil', 'drones', 'activos', 'precios', 'parametros', 'perfiles', 'ultimas', 'lecIni', 'jornadas', 'gastos', 'checklists', 'dupRev']) await idb.set(k, S[k]);
   } catch (e) {
     if (!esErrorDeRed(e)) console.warn('cargarDatos', e);
   }
@@ -385,6 +392,8 @@ rutas.inicio = {
       return `<li><div><div class="t">${esc(d.nombre)}</div>${ckTxt}</div>${estado}</li>`;
     }).join('');
     const pendientes = S.gastos.filter((g) => g.estado === 'pendiente').length;
+    const dupG = esAdmin() ? agruparDuplicados(trabajosPlanos(S.jornadas), S.gastos, S.dupRev) : { trabajos: [], gastos: [] };
+    const nDup = dupG.trabajos.length + dupG.gastos.length;
     return `
       <div class="hello"><span class="muted">${esc(fechaLarga(f))}</span><strong>Hola, ${esc((S.perfil?.nombre || S.user?.email || '').split(' ')[0])}</strong></div>
       <button class="action checklist-btn" data-go="checklist"><b>✓ Checklist de salida</b><span>Verifica equipos e insumos antes de salir al trabajo</span></button>
@@ -398,6 +407,7 @@ rutas.inicio = {
       <div class="card"><h2>Hoy</h2><ul class="list">${lineas || '<li class="muted">No tienes drones asignados.</li>'}</ul></div>
       ${esAdmin() ? `<div class="card"><h2>Administración</h2><ul class="list">
         <li><div><div class="t">Gastos por aprobar</div><div class="muted">Revisa soportes del aliado y pilotos</div></div><button class="btn small" data-go="aprobaciones">${pendientes}</button></li>
+        <li><div><div class="t">Posibles duplicados</div><div class="muted">Trabajos o gastos registrados dos veces</div></div><button class="btn small ${nDup ? '' : 'secondary'}" data-go="duplicados">${nDup}</button></li>
       </ul></div>` : ''}
       <div class="card"><h2>Registros</h2><ul class="list">
         <li><div><div class="t">Jornadas y trabajos</div><div class="muted">Últimos 45 días</div></div><button class="btn small secondary" data-go="registros">Ver</button></li>
@@ -540,6 +550,108 @@ rutas.jornada = {
 };
 
 /* ------------------------------------------------------------------ */
+/* Duplicados: detección antes de guardar y utilidades                 */
+/* ------------------------------------------------------------------ */
+const nombreDe = (id) => S.perfiles.find((p) => p.id === id)?.nombre || '';
+const conTimeout = (p, ms = 4000) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]);
+const cuando = (ts) => (ts ? new Date(ts).toLocaleString('es-CO', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' }) : '');
+const msgError = (e) => (/anulado|duplicados_revisados|buscar_|duplicado_de/.test(e?.message || '')
+  ? 'Falta ejecutar la migración 04 en Supabase (migracion_04_duplicados.sql).' : (e?.message || String(e)));
+
+const sinAnulados = (j) => ({ ...j, jornada_drones: (j.jornada_drones || []).map((jd) => ({ ...jd, trabajos: (jd.trabajos || []).filter((t) => !t.anulado) })) });
+const trabajosPlanos = (jornadas) => jornadas.flatMap((j) => (j.jornada_drones || []).flatMap((jd) => (jd.trabajos || []).map((t) => ({ ...t, fecha: j.fecha, dron: jd.dron_id }))));
+const claveGrupo = (g) => g.map((x) => x.id).sort().join(',');
+// Grupos de 2 o más registros iguales (trabajos: día+dron+cliente+finca; gastos: día+dron+categoría+valor)
+function agruparDuplicados(trabajos, gastos, revisados = []) {
+  const rev = new Set(revisados);
+  const agrupar = (lista, clave) => {
+    const m = new Map();
+    for (const x of lista) {
+      if (x.anulado) continue;
+      const k = clave(x);
+      if (!m.has(k)) m.set(k, []);
+      m.get(k).push(x);
+    }
+    return [...m.values()].filter((g) => g.length > 1 && !rev.has(claveGrupo(g)))
+      .map((g) => g.sort((a, b) => String(a.created_at).localeCompare(String(b.created_at))));
+  };
+  return {
+    trabajos: agrupar(trabajos, (t) => [t.fecha, t.dron, norm(t.cliente), norm(t.finca)].join('|')),
+    gastos: agrupar(gastos.filter((g) => g.estado !== 'rechazado'), (g) => [g.fecha, g.dron_id || '', g.categoria, Number(g.valor)].join('|'))
+  };
+}
+
+// Busca trabajos iguales: lo del servidor ya cargado, lo pendiente en este celular y, con señal, lo de todos los usuarios
+async function trabajosSimilares({ fecha, dron, cliente, finca }) {
+  const out = new Map();
+  for (const j of S.jornadas) {
+    if (j.fecha !== fecha) continue;
+    for (const jd of j.jornada_drones || []) {
+      if (jd.dron_id !== dron) continue;
+      for (const t of jd.trabajos || []) {
+        if (t.anulado || norm(t.cliente) !== norm(cliente) || norm(t.finca) !== norm(finca)) continue;
+        out.set(t.id, { id: t.id, ha: Number(t.ha), quien: nombreDe(t.creado_por), cuando: t.created_at, pendiente: false });
+      }
+    }
+  }
+  const jdId = await idJD(fecha, dron);
+  for (const it of await idb.all()) {
+    const r = it.row;
+    if (it.table !== 'trabajos' || r.jornada_dron_id !== jdId || norm(r.cliente) !== norm(cliente) || norm(r.finca) !== norm(finca)) continue;
+    out.set(r.id, { id: r.id, ha: Number(r.ha), quien: 'este celular', cuando: it.creado, pendiente: true });
+  }
+  if (navigator.onLine) {
+    try {
+      const { data, error } = await conTimeout(sb.rpc('buscar_trabajo_duplicado', { p_fecha: fecha, p_dron: dron, p_cliente: cliente, p_finca: finca || '' }));
+      if (!error) for (const t of data || []) if (!out.has(t.id)) out.set(t.id, { id: t.id, ha: Number(t.ha), quien: t.registrado_por || '', cuando: t.created_at, pendiente: false });
+    } catch { /* sin señal o sin migración: vale lo que hay en el celular */ }
+  }
+  return [...out.values()];
+}
+
+async function gastosSimilares({ fecha, dron_id, categoria, valor }) {
+  const out = new Map();
+  const igual = (g) => !g.anulado && g.estado !== 'rechazado' && g.fecha === fecha && (g.dron_id || '') === (dron_id || '') && g.categoria === categoria && Number(g.valor) === valor;
+  for (const g of S.gastos) {
+    if (igual(g)) out.set(g.id, { id: g.id, valor: Number(g.valor), descripcion: g.descripcion, quien: nombreDe(g.creado_por), cuando: g.created_at, pendiente: false });
+  }
+  for (const it of await idb.all()) {
+    if (it.table === 'gastos' && igual(it.row)) out.set(it.row.id, { id: it.row.id, valor: Number(it.row.valor), descripcion: it.row.descripcion, quien: 'este celular', cuando: it.creado, pendiente: true });
+  }
+  if (navigator.onLine) {
+    try {
+      const { data, error } = await conTimeout(sb.rpc('buscar_gasto_duplicado', { p_fecha: fecha, p_dron: dron_id || '', p_categoria: categoria, p_valor: valor }));
+      if (!error) for (const g of data || []) if (!out.has(g.id)) out.set(g.id, { id: g.id, valor: Number(g.valor), descripcion: g.descripcion, quien: g.registrado_por || '', cuando: g.created_at, pendiente: false });
+    } catch { /* igual que arriba */ }
+  }
+  return [...out.values()];
+}
+
+// Ventana con varias opciones; devuelve el valor del botón elegido
+function preguntar({ titulo, html, opciones }) {
+  return new Promise((res) => {
+    const ov = document.createElement('div');
+    ov.className = 'modal-bg';
+    ov.innerHTML = `<div class="modal" role="dialog" aria-modal="true" aria-label="${esc(titulo)}"><h2>${esc(titulo)}</h2>${html}
+      <div class="modal-btns">${opciones.map((o, i) => `<button type="button" class="btn ${o.clase || ''}" data-i="${i}">${esc(o.texto)}</button>`).join('')}</div></div>`;
+    ov.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-i]');
+      if (!b) return;
+      ov.remove();
+      res(opciones[Number(b.dataset.i)].valor);
+    });
+    document.body.appendChild(ov);
+    ov.querySelector('button')?.focus();
+  });
+}
+const OPCIONES_DUP = [
+  { texto: 'Es el mismo, no guardar', valor: 'mismo' },
+  { texto: 'Es otro, guardar igual', valor: 'nuevo', clase: 'secondary' },
+  { texto: 'Volver a revisar', valor: 'volver', clase: 'secondary' }
+];
+const quienCuando = (s) => `Registrado por ${esc(s.quien || 'otro usuario')} · ${esc(cuando(s.cuando))}${s.pendiente ? ' · aún sin subir' : ''}`;
+
+/* ------------------------------------------------------------------ */
 /* Vista: registrar trabajo                                            */
 /* ------------------------------------------------------------------ */
 const CULTIVOS = ['Café', 'Aguacate', 'Potrero', 'Caña de azúcar', 'Cítricos', 'Plátano', 'Maíz', 'Otro'];
@@ -608,11 +720,28 @@ rutas.trabajo = {
     });
     $('#tipo').addEventListener('change', () => { if ($('#tipo').value === 'paquete') $('#paquete').dispatchEvent(new Event('change')); upd(); });
     upd();
+    let ocupado = false; // evita guardar dos veces si se toca el botón repetido
     $('#f-t').addEventListener('submit', async (e) => {
       e.preventDefault();
+      if (ocupado) return;
       const fecha = $('#fecha').value, dron = $('#dron').value, tipo = $('#tipo').value;
       const ha = num($('#ha').value);
       if (!ha || ha <= 0) return toast('Ingresa las hectáreas');
+      ocupado = true;
+      try {
+      // ¿Ya hay un trabajo igual (mismo día, dron, cliente y finca)? Se pregunta antes de crear nada
+      const similares = await trabajosSimilares({ fecha, dron, cliente: $('#cliente').value.trim(), finca: $('#finca').value.trim() });
+      if (similares.length) {
+        const r = await preguntar({
+          titulo: 'Ya hay un trabajo parecido',
+          html: `<p class="muted">Mismo día, dron, cliente y finca:</p>
+            <ul class="list">${similares.map((s) => `<li><div><div class="t">${esc(s.ha.toLocaleString('es-CO'))} Ha</div><div class="muted">${quienCuando(s)}</div></div></li>`).join('')}</ul>
+            <p class="muted">Tú vas a guardar <b>${esc(ha.toLocaleString('es-CO'))} Ha</b>. ¿Es el mismo trabajo?</p>`,
+          opciones: OPCIONES_DUP
+        });
+        if (r === 'volver') return;
+        if (r === 'mismo') { toast('No se guardó: ya estaba registrado'); ir('inicio', {}, true); return; }
+      }
       const { jdId } = await asegurarJornada(fecha, dron);
       const row = {
         id: uuid(), jornada_dron_id: jdId,
@@ -625,6 +754,7 @@ rutas.trabajo = {
       await encolar({ op: 'upsert', table: 'trabajos', row, ignore: true }, `Trabajo ${row.cliente} · ${ha} Ha`);
       toast(tipo === 'paquete' ? 'Trabajo guardado. Registra el costo del producto como gasto.' : 'Trabajo guardado');
       ir('inicio', {}, true);
+      } finally { ocupado = false; }
     });
   }
 };
@@ -740,12 +870,29 @@ rutas.gasto = {
   init: () => {
     conectarFoto('foto');
     $('#valor').addEventListener('input', (e) => { const n = soloDigitos(e.target.value); e.target.value = n ? n.toLocaleString('es-CO') : ''; });
+    let ocupado = false;
     $('#f-g').addEventListener('submit', async (e) => {
       e.preventDefault();
+      if (ocupado) return;
       const valor = soloDigitos($('#valor').value);
       if (!valor) return toast('Ingresa el valor');
       const foto = $('#foto').files?.[0];
       if (!foto && !esAdmin() && !confirm('No adjuntaste foto del soporte. Sin soporte el gasto puede ser rechazado. ¿Guardar igual?')) return;
+      ocupado = true;
+      try {
+      // ¿Ya hay un gasto igual (mismo día, dron, categoría y valor)?
+      const similares = await gastosSimilares({ fecha: $('#fecha').value, dron_id: $('#dron').value || null, categoria: $('#cat').value, valor });
+      if (similares.length) {
+        const r = await preguntar({
+          titulo: 'Ya hay un gasto igual',
+          html: `<p class="muted">Mismo día, dron, categoría y valor (<b>${money(valor)}</b>):</p>
+            <ul class="list">${similares.map((s) => `<li><div><div class="t">${esc(s.descripcion || 'Sin descripción')}</div><div class="muted">${quienCuando(s)}</div></div></li>`).join('')}</ul>
+            <p class="muted">Si son dos pagos distintos (por ejemplo, dos peajes iguales), guárdalo como otro.</p>`,
+          opciones: OPCIONES_DUP
+        });
+        if (r === 'volver') return;
+        if (r === 'mismo') { toast('No se guardó: ya estaba registrado'); ir('inicio', {}, true); return; }
+      }
       const id = uuid();
       let soporte = null;
       if (foto) {
@@ -756,6 +903,7 @@ rutas.gasto = {
       await encolar({ op: 'upsert', table: 'gastos', row, ignore: true }, `Gasto ${nombreCat(row.categoria)} ${money(valor)}`);
       toast('Gasto guardado');
       ir('inicio', {}, true);
+      } finally { ocupado = false; }
     });
   }
 };
@@ -845,9 +993,10 @@ rutas.registros = {
         ${S.checklists.filter((c) => c.fecha === j.fecha && (esAdmin() || misDrones().some((d) => d.id === c.dron_id))).map((c) => `<p class="muted">Checklist ${esc(c.dron_id)}: ${c.completo ? '✓ completo' : '⚠ faltó ' + esc(faltantes(c).join(', '))}${c.notas ? ' · ' + esc(c.notas) : ''}</p>`).join('')}
         <ul class="list">${jds.flatMap((jd) => (jd.trabajos || []).map((t) => `<li><div><div class="t">${esc(t.cliente)}${t.finca ? ' · ' + esc(t.finca) : ''}</div>
           <div class="muted">${esc(jd.dron_id)} · ${esc(t.cultivo || '')} · ${t.litros_ha ? esc(t.litros_ha) + ' L/Ha' : esc(t.tipo_servicio)}</div></div>
-          <span class="badge">${esc(t.ha)} Ha</span></li>`)).join('') || '<li class="muted">Sin trabajos registrados</li>'}</ul></div>`;
+          <div class="stack"><span class="badge">${esc(t.ha)} Ha</span>${esAdmin() ? `<button class="btn small danger" data-anular="trabajos:${esc(t.id)}:${esc(j.fecha)}:${esc(jd.dron_id)}">Anular</button>` : ''}</div></li>`)).join('') || '<li class="muted">Sin trabajos registrados</li>'}</ul></div>`;
     }).join('');
-  }
+  },
+  init: () => conectarAnular()
 };
 
 const badgeEstado = (e) => e === 'aprobado' ? '<span class="badge">Aprobado</span>' : e === 'rechazado' ? '<span class="badge danger">Rechazado</span>' : '<span class="badge warn">Pendiente</span>';
@@ -857,8 +1006,9 @@ rutas.gastos = {
     const lista = esAdmin() ? S.gastos : S.gastos.filter((g) => g.creado_por === S.user.id || misDrones().some((d) => d.id === g.dron_id));
     if (!lista.length) return '<div class="card"><p class="muted">No hay gastos en los últimos 45 días.</p></div>';
     return `<div class="card"><ul class="list">${lista.map((g) => `<li><div><div class="t">${esc(nombreCat(g.categoria))} · <span class="money">${money(g.valor)}</span></div>
-      <div class="muted">${esc(g.fecha)} · ${esc(g.dron_id || 'General')}${g.descripcion ? ' · ' + esc(g.descripcion) : ''}</div></div>${badgeEstado(g.estado)}</li>`).join('')}</ul></div>`;
-  }
+      <div class="muted">${esc(g.fecha)} · ${esc(g.dron_id || 'General')}${g.descripcion ? ' · ' + esc(g.descripcion) : ''}</div></div><div class="stack">${badgeEstado(g.estado)}${esAdmin() ? `<button class="btn small danger" data-anular="gastos:${esc(g.id)}:${esc(g.fecha)}:${esc(g.dron_id || '')}">Anular</button>` : ''}</div></li>`).join('')}</ul></div>`;
+  },
+  init: () => conectarAnular()
 };
 
 rutas.cola = {
@@ -885,7 +1035,8 @@ rutas.aprobaciones = {
   titulo: 'Aprobar gastos',
   html: async () => {
     if (!navigator.onLine) return '<div class="card"><p class="note">Necesitas señal para aprobar gastos.</p></div>';
-    const { data, error } = await sb.from('gastos').select('*').eq('estado', 'pendiente').order('fecha');
+    const { data: bruto, error } = await sb.from('gastos').select('*').eq('estado', 'pendiente').order('fecha');
+    const data = (bruto || []).filter((g) => !g.anulado);
     if (error) return `<div class="card"><p class="note">${esc(error.message)}</p></div>`;
     if (!data.length) return '<div class="card"><p>No hay gastos pendientes.</p></div>';
     const nombres = Object.fromEntries(S.perfiles.map((p) => [p.id, p.nombre]));
@@ -910,6 +1061,146 @@ rutas.aprobaciones = {
       card.remove();
       toast(b.dataset.accion === 'aprobado' ? 'Gasto aprobado' : 'Gasto rechazado');
       cargarDatos();
+    }));
+  }
+};
+
+/* ------------------------------------------------------------------ */
+/* Administración: anular, revisar y fusionar duplicados               */
+/* ------------------------------------------------------------------ */
+// La app no guarda "liquidaciones cerradas": avisa cuando el registro es de un mes que ya pasó
+// o de un dron que entra en la liquidación con el aliado.
+function avisoLiquidacion(fecha, dronId) {
+  const msgs = [];
+  const d = S.drones.find((x) => x.id === dronId);
+  if (d && d.propietario !== 'COLFOG') msgs.push(`El dron ${dronId} entra en la liquidación con Martin Ruiz.`);
+  if (fecha && fecha.slice(0, 7) < hoy().slice(0, 7)) msgs.push(`El registro es de ${fecha.slice(0, 7)}, un mes que ya terminó. Si ya liquidaste o facturaste ese mes, el valor cambia y habrá que ajustarlo.`);
+  return msgs.length ? '⚠ ' + msgs.join('\n⚠ ') + '\n\n' : '';
+}
+
+async function anularRegistro(tabla, id, fecha, dron) {
+  if (!navigator.onLine) return toast('Necesitas señal para anular');
+  const motivo = prompt(`${avisoLiquidacion(fecha, dron)}Motivo de la anulación (el registro no se borra, se puede restaurar):`, 'Duplicado');
+  if (motivo === null) return;
+  const { data, error } = await sb.from(tabla).update({ anulado: true, anulado_motivo: motivo.trim() || 'Sin motivo', anulado_por: S.user.id, anulado_at: new Date().toISOString() }).eq('id', id).select('id');
+  if (error || !data?.length) return toast(error ? msgError(error) : 'No se pudo anular');
+  toast('Registro anulado');
+  await cargarDatos();
+  render();
+}
+function conectarAnular() {
+  $$('[data-anular]').forEach((b) => b.addEventListener('click', () => {
+    const [tabla, id, fecha, dron] = b.dataset.anular.split(':');
+    anularRegistro(tabla, id, fecha, dron);
+  }));
+}
+
+async function cargarParaDuplicados() {
+  const desde = new Date(Date.now() - 90 * 864e5).toISOString().slice(0, 10);
+  const [jor, gas, rev] = await Promise.all([
+    sb.from('jornadas').select('id, fecha, jornada_drones(id, dron_id, trabajos(*))').gte('fecha', desde).order('fecha', { ascending: false }),
+    sb.from('gastos').select('*').gte('fecha', desde).order('fecha', { ascending: false }),
+    sb.from('duplicados_revisados').select('clave')
+  ]);
+  if (jor.error) throw jor.error;
+  if (gas.error) throw gas.error;
+  if (rev.error) throw rev.error;
+  S.dupRev = (rev.data || []).map((x) => x.clave);
+  return { trabajos: trabajosPlanos(jor.data || []), gastos: gas.data || [], revisados: S.dupRev };
+}
+
+// Conserva un registro, completa sus campos vacíos con los del duplicado y anula los demás
+async function fusionarDuplicados(tabla, grupo, keepId) {
+  const keep = grupo.find((x) => x.id === keepId);
+  const otros = grupo.filter((x) => x.id !== keepId);
+  const campos = tabla === 'trabajos' ? ['finca', 'municipio', 'cultivo', 'litros_ha', 'precio_id', 'notas'] : ['descripcion', 'soporte'];
+  const completar = {};
+  for (const o of otros) {
+    for (const c of campos) {
+      if ((keep[c] == null || keep[c] === '') && o[c] != null && o[c] !== '' && completar[c] == null) completar[c] = o[c];
+    }
+  }
+  const ahora = new Date().toISOString();
+  for (const o of otros) {
+    const { data, error } = await sb.from(tabla).update({ anulado: true, anulado_motivo: 'Duplicado', anulado_por: S.user.id, anulado_at: ahora, duplicado_de: keepId }).eq('id', o.id).select('id');
+    if (error) throw error;
+    if (!data?.length) throw new Error('No se pudo anular el duplicado');
+  }
+  if (Object.keys(completar).length) {
+    const { error } = await sb.from(tabla).update(completar).eq('id', keepId);
+    if (error) throw error;
+  }
+}
+
+let DUP = null; // datos de la vista de duplicados (para los botones)
+rutas.duplicados = {
+  titulo: 'Posibles duplicados',
+  html: async () => {
+    if (!esAdmin()) return '<div class="card"><p class="muted">Solo para COLFOG.</p></div>';
+    if (!navigator.onLine) return '<div class="card"><p class="note">Necesitas señal para revisar duplicados.</p></div>';
+    let D;
+    try { D = await cargarParaDuplicados(); } catch (e) { return `<div class="card"><p class="note">${esc(msgError(e))}</p></div>`; }
+    const G = agruparDuplicados(D.trabajos, D.gastos, D.revisados);
+    DUP = { grupos: G, todos: D };
+    const tarjetaT = (g, i) => `<div class="card" data-grupo="trabajos:${i}"><h2>${esc(g[0].cliente)}${g[0].finca ? ' · ' + esc(g[0].finca) : ''}</h2>
+      <p class="muted">${esc(fechaLarga(g[0].fecha))} · ${esc(g[0].dron)}</p>
+      <ul class="list">${g.map((t) => `<li><div><div class="t">${esc(Number(t.ha).toLocaleString('es-CO'))} Ha${t.litros_ha ? ' · ' + esc(t.litros_ha) + ' L/Ha' : ''}</div>
+        <div class="muted">${esc(nombreDe(t.creado_por) || '—')} · ${esc(cuando(t.created_at))}${t.notas ? ' · ' + esc(t.notas) : ''}</div></div>
+        <button class="btn small" data-conservar="${esc(t.id)}">Conservar este</button></li>`).join('')}</ul>
+      <button class="btn small secondary" data-no-dup="trabajos:${i}">No son duplicados</button></div>`;
+    const tarjetaG = (g, i) => `<div class="card" data-grupo="gastos:${i}"><h2>${esc(nombreCat(g[0].categoria))} · <span class="money">${money(g[0].valor)}</span></h2>
+      <p class="muted">${esc(fechaLarga(g[0].fecha))} · ${esc(g[0].dron_id || 'General')}</p>
+      <ul class="list">${g.map((x) => `<li><div><div class="t">${esc(x.descripcion || 'Sin descripción')}</div>
+        <div class="muted">${esc(nombreDe(x.creado_por) || '—')} · ${esc(cuando(x.created_at))} · ${x.soporte ? 'con foto' : 'sin foto'} · ${esc(x.estado)}</div></div>
+        <button class="btn small" data-conservar="${esc(x.id)}">Conservar este</button></li>`).join('')}</ul>
+      <button class="btn small secondary" data-no-dup="gastos:${i}">No son duplicados</button></div>`;
+    const resumen = (tabla, x) => (tabla === 'trabajos'
+      ? `${esc(x.cliente)}${x.finca ? ' · ' + esc(x.finca) : ''} · ${esc(Number(x.ha).toLocaleString('es-CO'))} Ha`
+      : `${esc(nombreCat(x.categoria))} · ${money(x.valor)}`);
+    const anulados = [...D.trabajos.filter((t) => t.anulado).map((x) => ['trabajos', x]), ...D.gastos.filter((g) => g.anulado).map((x) => ['gastos', x])]
+      .sort((a, b) => String(b[1].anulado_at || '').localeCompare(String(a[1].anulado_at || '')));
+    return `<p class="muted">Últimos 90 días. Trabajos: mismo día, dron, cliente y finca. Gastos: mismo día, dron, categoría y valor. Elige cuál conservar: los demás se anulan (no se borran) y dejan de contar en el tablero y la liquidación.</p>
+      ${G.trabajos.length || G.gastos.length ? G.trabajos.map(tarjetaT).join('') + G.gastos.map(tarjetaG).join('') : '<div class="card"><p>No hay posibles duplicados.</p></div>'}
+      ${anulados.length ? `<div class="card"><h2>Anulados</h2><ul class="list">${anulados.map(([tabla, x]) => `<li><div><div class="t">${resumen(tabla, x)}</div>
+        <div class="muted">${esc(x.fecha)} · ${esc(x.anulado_motivo || '')}${x.anulado_por ? ' · ' + esc(nombreDe(x.anulado_por)) : ''}</div></div>
+        <button class="btn small secondary" data-restaurar="${tabla}:${esc(x.id)}">Restaurar</button></li>`).join('')}</ul></div>` : ''}`;
+  },
+  init: () => {
+    $$('[data-conservar]').forEach((b) => b.addEventListener('click', async () => {
+      const [tabla, i] = b.closest('[data-grupo]').dataset.grupo.split(':');
+      const grupo = DUP.grupos[tabla][Number(i)];
+      const otros = grupo.filter((x) => x.id !== b.dataset.conservar);
+      // en gastos solo importa si lo que se anula ya estaba aprobado (cuenta en la liquidación)
+      const cuenta = tabla === 'trabajos' || otros.some((x) => x.estado === 'aprobado');
+      const aviso = cuenta ? avisoLiquidacion(grupo[0].fecha, tabla === 'trabajos' ? grupo[0].dron : grupo[0].dron_id) : '';
+      if (!confirm(`Se conserva este registro y se anula${otros.length > 1 ? 'n' : ''} ${otros.length} duplicado${otros.length > 1 ? 's' : ''}.\n\n${aviso}¿Continuar?`)) return;
+      b.disabled = true;
+      try {
+        await fusionarDuplicados(tabla, grupo, b.dataset.conservar);
+        toast('Duplicado anulado');
+        await cargarDatos();
+        render();
+      } catch (e) { toast(msgError(e)); b.disabled = false; }
+    }));
+    $$('[data-no-dup]').forEach((b) => b.addEventListener('click', async () => {
+      const [tabla, i] = b.dataset.noDup.split(':');
+      const grupo = DUP.grupos[tabla][Number(i)];
+      const { error } = await sb.from('duplicados_revisados').upsert({ clave: claveGrupo(grupo) });
+      if (error) return toast(msgError(error));
+      toast('Marcado: no son duplicados');
+      await cargarDatos();
+      render();
+    }));
+    $$('[data-restaurar]').forEach((b) => b.addEventListener('click', async () => {
+      const [tabla, id] = b.dataset.restaurar.split(':');
+      const x = (tabla === 'trabajos' ? DUP.todos.trabajos : DUP.todos.gastos).find((r) => r.id === id);
+      const aviso = x ? avisoLiquidacion(x.fecha, tabla === 'trabajos' ? x.dron : x.dron_id) : '';
+      if (!confirm(`Se restaura este registro y vuelve a contar en el tablero.\n\n${aviso}¿Continuar?`)) return;
+      const { data, error } = await sb.from(tabla).update({ anulado: false, anulado_motivo: null, anulado_por: null, anulado_at: null, duplicado_de: null }).eq('id', id).select('id');
+      if (error || !data?.length) return toast(error ? msgError(error) : 'No se pudo restaurar');
+      toast('Registro restaurado');
+      await cargarDatos();
+      render();
     }));
   }
 };
