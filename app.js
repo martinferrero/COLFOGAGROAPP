@@ -117,9 +117,12 @@ const S = {
 };
 const esAdmin = () => S.perfil?.rol === 'admin';
 const esAliado = () => S.perfil?.rol === 'aliado';
-const veDinero = () => esAdmin() || esAliado();
+const esConsulta = () => S.perfil?.rol === 'consulta';   // gerente administrativa: solo lee y descarga Excel
+const veDinero = () => esAdmin() || esAliado() || esConsulta();
+// Aprueba o rechaza gastos: el admin siempre; consulta solo si el admin le activó el permiso (perfiles.puede_aprobar)
+const puedeAprobar = () => esAdmin() || (esConsulta() && !!S.perfil?.puede_aprobar);
 function misDrones() {
-  if (esAdmin()) return S.drones;
+  if (esAdmin() || esConsulta()) return S.drones;
   if (esAliado()) return S.drones.filter((d) => d.aliado_id === S.user?.id);
   return S.drones; // piloto: puede registrar cualquiera
 }
@@ -396,15 +399,19 @@ rutas.inicio = {
     const nDup = dupG.trabajos.length + dupG.gastos.length;
     return `
       <div class="hello"><span class="muted">${esc(fechaLarga(f))}</span><strong>Hola, ${esc((S.perfil?.nombre || S.user?.email || '').split(' ')[0])}</strong></div>
-      <button class="action checklist-btn" data-go="checklist"><b>✓ Checklist de salida</b><span>Verifica equipos e insumos antes de salir al trabajo</span></button>
+      ${esConsulta() ? '' : `<button class="action checklist-btn" data-go="checklist"><b>✓ Checklist de salida</b><span>Verifica equipos e insumos antes de salir al trabajo</span></button>
       <div class="grid-actions">
         <button class="action primary" data-go="jornada"><b>Iniciar jornada</b><span>Km, baterías, generador</span></button>
         <button class="action" data-go="trabajo"><b>Registrar trabajo</b><span>Cliente, Ha, litros</span></button>
         <button class="action" data-go="cierre"><b>Cerrar jornada</b><span>Lecturas finales, diésel</span></button>
         <button class="action" data-go="gasto"><b>Registrar gasto</b><span>Con foto del soporte</span></button>
-      </div>
-      ${veDinero() ? `<button class="action tablero-btn" data-go="tablero"><b>Tablero</b><span>Hectáreas, ingresos, costos, utilidad${esAdmin() ? ' y liquidación del aliado' : ''}</span></button>` : ''}
+      </div>`}
+      ${veDinero() ? `<button class="action tablero-btn" data-go="tablero"><b>Tablero</b><span>Hectáreas, ingresos, costos, utilidad${esAdmin() || esConsulta() ? ' y liquidación del aliado' : ''}</span></button>` : ''}
+      ${esAdmin() || esConsulta() ? '<button class="action tablero-btn" data-go="exportar"><b>Descargar Excel</b><span>Resumen por dron, trabajos, gastos, jornadas, lecturas y más</span></button>' : ''}
       <div class="card"><h2>Hoy</h2><ul class="list">${lineas || '<li class="muted">No tienes drones asignados.</li>'}</ul></div>
+      ${!esAdmin() && puedeAprobar() ? `<div class="card"><h2>Gastos</h2><ul class="list">
+        <li><div><div class="t">Gastos por aprobar</div><div class="muted">Revisa soportes y aprueba o rechaza</div></div><button class="btn small" data-go="aprobaciones">${pendientes}</button></li>
+      </ul></div>` : ''}
       ${esAdmin() ? `<div class="card"><h2>Administración</h2><ul class="list">
         <li><div><div class="t">Gastos por aprobar</div><div class="muted">Revisa soportes del aliado y pilotos</div></div><button class="btn small" data-go="aprobaciones">${pendientes}</button></li>
         <li><div><div class="t">Posibles duplicados</div><div class="muted">Trabajos o gastos registrados dos veces</div></div><button class="btn small ${nDup ? '' : 'secondary'}" data-go="duplicados">${nDup}</button></li>
@@ -412,7 +419,7 @@ rutas.inicio = {
       <div class="card"><h2>Registros</h2><ul class="list">
         <li><div><div class="t">Jornadas y trabajos</div><div class="muted">Últimos 45 días</div></div><button class="btn small secondary" data-go="registros">Ver</button></li>
         <li><div><div class="t">Mis gastos</div><div class="muted">Estado de aprobación</div></div><button class="btn small secondary" data-go="gastos">Ver</button></li>
-        <li><div><div class="t">Pendientes por subir</div><div class="muted">Se suben solos al tener señal</div></div><button class="btn small secondary" data-go="cola">Ver</button></li>
+        ${esConsulta() ? '' : '<li><div><div class="t">Pendientes por subir</div><div class="muted">Se suben solos al tener señal</div></div><button class="btn small secondary" data-go="cola">Ver</button></li>'}
       </ul></div>
       <div class="footer-links"><span class="muted">v${esc(CFG.APP_VERSION)} · ${esc(S.perfil?.rol || '')}</span><button class="linklike" id="salir">Cerrar sesión</button></div>`;
   },
@@ -465,15 +472,22 @@ function validarLecturas(lecturas) {
 /* ------------------------------------------------------------------ */
 /* Jornada y dron del día (IDs determinísticos)                        */
 /* ------------------------------------------------------------------ */
-async function asegurarJornada(fecha, dron, extra = {}) {
+// opciones.servicio = true: ese día el aliado vuela este dron prestando el servicio de piloto a COLFOG (cobra el día)
+async function asegurarJornada(fecha, dron, extra = {}, opciones = {}) {
   const jid = await idJornada(fecha);
   const jdId = await idJD(fecha, dron);
   const row = { id: jid, fecha, ...extra };
   // El admin puede completar datos de camioneta de una jornada creada por otro
   await encolar({ op: 'upsert', table: 'jornadas', row, ignore: !esAdmin() || !Object.keys(extra).length }, `Jornada ${fecha}`);
   const d = S.drones.find((x) => x.id === dron);
-  const piloto = esAdmin() && d?.propietario === 'ALIADO' && d.aliado_id ? d.aliado_id : S.user.id;
-  await encolar({ op: 'upsert', table: 'jornada_drones', row: { id: jdId, jornada_id: jid, dron_id: dron, piloto_id: piloto }, ignore: true }, `${dron} en jornada ${fecha}`);
+  let piloto = esAdmin() && d?.propietario === 'ALIADO' && d.aliado_id ? d.aliado_id : S.user.id;
+  const rowJd = { id: jdId, jornada_id: jid, dron_id: dron, piloto_id: piloto };
+  if (opciones.servicio) {
+    rowJd.piloto_id = esAliado() ? S.user.id : (S.perfiles.find((p) => p.rol === 'aliado')?.id || piloto);
+    rowJd.piloto_servicio = true;   // el valor del día lo fija el servidor
+  }
+  // Con servicio se actualiza aunque el dron del día ya exista; sin servicio no se toca lo que ya hay
+  await encolar({ op: 'upsert', table: 'jornada_drones', row: rowJd, ignore: !opciones.servicio }, `${dron} en jornada ${fecha}${opciones.servicio ? ' (servicio de piloto)' : ''}`);
   const dia = (await idb.get('dia:' + fecha)) || { drones: {} };
   dia.drones[dron] = { ...(dia.drones[dron] || {}), iniciada: true, jdId };
   if (Object.keys(extra).length) dia.creadaPorMi = true;
@@ -494,6 +508,7 @@ rutas.jornada = {
         <div class="chips">${mis.map((d) => `<label class="chip"><input type="checkbox" name="dron" value="${d.id}" ${d.id === def ? 'checked' : ''}>${esc(d.id)}</label>`).join('')}</div>
         ${esAdmin() ? '<p class="muted">Marca todos los drones que salen: la camioneta y el auxiliar se reparten entre ellos.</p>' : ''}
         <div id="aviso-chk"></div>
+        <div id="pilotos"></div>
       </div>
       <div class="card">
         <h2>Camioneta y auxiliar</h2>
@@ -510,8 +525,24 @@ rutas.jornada = {
     </form>`;
   },
   init: () => {
+    // ¿Quién vuela hoy? Solo aplica a drones que no son del aliado (T55 y T55S)
+    const eleccion = {};
+    const pintarPilotos = (sel) => {
+      const aliadoP = S.perfiles.find((p) => p.rol === 'aliado');
+      const monto = veDinero() ? ` (${money(S.parametros.pago_piloto_dia ?? 100000)} el día)` : '';
+      const ops = esAliado()
+        ? [['habitual', 'Vuelo normal (sin cobro de día)'], ['servicio', `Presto el servicio de piloto a COLFOG${monto}`]]
+        : [['habitual', 'Piloto habitual'], ['servicio', `${aliadoP?.nombre || 'El aliado'} presta el servicio de piloto a COLFOG${monto}`]];
+      const aplica = sel.filter((d) => S.drones.find((x) => x.id === d)?.propietario !== 'ALIADO' && (esAliado() || aliadoP));
+      $('#pilotos').innerHTML = aplica.length
+        ? '<p class="muted">Si el dron del aliado está dañado y él vuela otro dron, marca "presta el servicio" para que se le pague el día.</p>'
+          + aplica.map((d) => `<label for="p-${esc(d)}">${esc(d)} · ¿Quién vuela hoy?</label><select id="p-${esc(d)}" data-piloto-dron="${esc(d)}">${ops.map(([v, t]) => `<option value="${v}" ${eleccion[d] === v ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select>`).join('')
+        : '';
+      $$('[data-piloto-dron]').forEach((s) => s.addEventListener('change', () => { eleccion[s.dataset.pilotoDron] = s.value; }));
+    };
     const pintar = async () => {
       const sel = $$('input[name=dron]:checked').map((i) => i.value);
+      pintarPilotos(sel);
       const loc = (await idb.get('chk:' + $('#fecha').value)) || {};
       const sinChk = sel.filter((d) => !checklistDe($('#fecha').value, d, loc));
       $('#aviso-chk').innerHTML = sinChk.length ? `<p class="note">Falta el checklist de salida de ${esc(sinChk.join(', '))}. <button type="button" class="linklike" data-go-chk>Hacerlo ahora</button></p>` : '';
@@ -533,7 +564,7 @@ rutas.jornada = {
       const odo = num($('#odo').value);
       if (usaCam && odo != null) extra.odometro_ini = odo;
       for (const dron of sel) {
-        const { jdId } = await asegurarJornada(fecha, dron, extra);
+        const { jdId } = await asegurarJornada(fecha, dron, extra, { servicio: eleccion[dron] === 'servicio' });
         for (const card of $$(`[data-dron="${dron}"]`)) {
           for (const l of leerLecturas(card)) {
             await encolar({ op: 'upsert', table: 'lecturas', row: { id: await idLectura(jdId, l.activo_id), jornada_dron_id: jdId, activo_id: l.activo_id, inicio: l.valor } }, `Lectura inicio ${dron}`);
@@ -989,21 +1020,22 @@ rutas.registros = {
       const jds = (j.jornada_drones || []).filter((jd) => esAdmin() || !esAliado() || misDrones().some((d) => d.id === jd.dron_id));
       const km = j.odometro_fin != null && j.odometro_ini != null ? j.odometro_fin - j.odometro_ini : null;
       return `<div class="card"><h2>${esc(fechaLarga(j.fecha))}</h2>
-        <p class="muted">Drones: ${(j.jornada_drones || []).map((x) => x.dron_id).join(' + ') || '—'}${km != null ? ` · ${km} km` : ''}${veDinero() && j.diesel_valor ? ` · Diésel ${money(j.diesel_valor)}` : ''}${j.auxiliar ? ' · Con auxiliar' : ''}</p>
+        <p class="muted">Drones: ${(j.jornada_drones || []).map((x) => x.dron_id + (x.piloto_servicio ? ' (piloto por servicio)' : '')).join(' + ') || '—'}${km != null ? ` · ${km} km` : ''}${veDinero() && j.diesel_valor ? ` · Diésel ${money(j.diesel_valor)}` : ''}${j.auxiliar ? ' · Con auxiliar' : ''}</p>
+        ${esAdmin() ? (j.jornada_drones || []).filter((jd) => S.drones.find((d) => d.id === jd.dron_id)?.propietario !== 'ALIADO').map((jd) => `<button class="btn small secondary" data-servicio="${esc(jd.id)}:${jd.piloto_servicio ? 0 : 1}:${esc(j.creado_por)}">${jd.piloto_servicio ? 'Quitar servicio de piloto' : 'Piloto por servicio'} · ${esc(jd.dron_id)}</button>`).join(' ') : ''}
         ${S.checklists.filter((c) => c.fecha === j.fecha && (esAdmin() || misDrones().some((d) => d.id === c.dron_id))).map((c) => `<p class="muted">Checklist ${esc(c.dron_id)}: ${c.completo ? '✓ completo' : '⚠ faltó ' + esc(faltantes(c).join(', '))}${c.notas ? ' · ' + esc(c.notas) : ''}</p>`).join('')}
         <ul class="list">${jds.flatMap((jd) => (jd.trabajos || []).map((t) => `<li><div><div class="t">${esc(t.cliente)}${t.finca ? ' · ' + esc(t.finca) : ''}</div>
           <div class="muted">${esc(jd.dron_id)} · ${esc(t.cultivo || '')} · ${t.litros_ha ? esc(t.litros_ha) + ' L/Ha' : esc(t.tipo_servicio)}</div></div>
           <div class="stack"><span class="badge">${esc(t.ha)} Ha</span>${esAdmin() ? `<button class="btn small danger" data-anular="trabajos:${esc(t.id)}:${esc(j.fecha)}:${esc(jd.dron_id)}">Anular</button>` : ''}</div></li>`)).join('') || '<li class="muted">Sin trabajos registrados</li>'}</ul></div>`;
     }).join('');
   },
-  init: () => conectarAnular()
+  init: () => { conectarAnular(); conectarServicio(); }
 };
 
 const badgeEstado = (e) => e === 'aprobado' ? '<span class="badge">Aprobado</span>' : e === 'rechazado' ? '<span class="badge danger">Rechazado</span>' : '<span class="badge warn">Pendiente</span>';
 rutas.gastos = {
   titulo: 'Mis gastos',
   html: () => {
-    const lista = esAdmin() ? S.gastos : S.gastos.filter((g) => g.creado_por === S.user.id || misDrones().some((d) => d.id === g.dron_id));
+    const lista = esAdmin() || esConsulta() ? S.gastos : S.gastos.filter((g) => g.creado_por === S.user.id || misDrones().some((d) => d.id === g.dron_id));
     if (!lista.length) return '<div class="card"><p class="muted">No hay gastos en los últimos 45 días.</p></div>';
     return `<div class="card"><ul class="list">${lista.map((g) => `<li><div><div class="t">${esc(nombreCat(g.categoria))} · <span class="money">${money(g.valor)}</span></div>
       <div class="muted">${esc(g.fecha)} · ${esc(g.dron_id || 'General')}${g.descripcion ? ' · ' + esc(g.descripcion) : ''}</div></div><div class="stack">${badgeEstado(g.estado)}${esAdmin() ? `<button class="btn small danger" data-anular="gastos:${esc(g.id)}:${esc(g.fecha)}:${esc(g.dron_id || '')}">Anular</button>` : ''}</div></li>`).join('')}</ul></div>`;
@@ -1034,6 +1066,7 @@ rutas.cola = {
 rutas.aprobaciones = {
   titulo: 'Aprobar gastos',
   html: async () => {
+    if (!puedeAprobar()) return '<div class="card"><p class="muted">No tienes permiso para aprobar gastos.</p></div>';
     if (!navigator.onLine) return '<div class="card"><p class="note">Necesitas señal para aprobar gastos.</p></div>';
     const { data: bruto, error } = await sb.from('gastos').select('*').eq('estado', 'pendiente').order('fecha');
     const data = (bruto || []).filter((g) => !g.anulado);
@@ -1056,8 +1089,8 @@ rutas.aprobaciones = {
   init: () => {
     $$('[data-accion]').forEach((b) => b.addEventListener('click', async () => {
       const card = b.closest('[data-id]');
-      const { error } = await sb.from('gastos').update({ estado: b.dataset.accion, revisado_por: S.user.id }).eq('id', card.dataset.id);
-      if (error) return toast(error.message);
+      const { data: ok, error } = await sb.from('gastos').update({ estado: b.dataset.accion, revisado_por: S.user.id }).eq('id', card.dataset.id).select('id');
+      if (error || !ok?.length) return toast(error ? msgError(error) : 'No se pudo guardar. ¿Tienes permiso para aprobar?');
       card.remove();
       toast(b.dataset.accion === 'aprobado' ? 'Gasto aprobado' : 'Gasto rechazado');
       cargarDatos();
@@ -1087,6 +1120,26 @@ async function anularRegistro(tabla, id, fecha, dron) {
   toast('Registro anulado');
   await cargarDatos();
   render();
+}
+// Admin: marcar o quitar "piloto por servicio" en un dron de un día ya registrado
+function conectarServicio() {
+  $$('[data-servicio]').forEach((b) => b.addEventListener('click', async () => {
+    const [id, activar, creador] = b.dataset.servicio.split(':');
+    if (!navigator.onLine) return toast('Necesitas señal');
+    const ali = S.perfiles.find((p) => p.rol === 'aliado');
+    if (activar === '1' && !ali) return toast('No hay un usuario aliado');
+    const valor = money(S.parametros.pago_piloto_dia ?? 100000);
+    const txt = activar === '1'
+      ? `Se registra que ${ali.nombre} vuela este dron prestando el servicio a COLFOG. Se le pagará el día (${valor}) y el costo entra a los gastos del dron.\n\n¿Continuar?`
+      : 'Se quita el servicio de piloto de este día: ya no se le cobra ni se suma al costo.\n\n¿Continuar?';
+    if (!confirm(txt)) return;
+    const cambios = activar === '1' ? { piloto_servicio: true, piloto_id: ali.id } : { piloto_servicio: false, piloto_id: creador };
+    const { data, error } = await sb.from('jornada_drones').update(cambios).eq('id', id).select('id');
+    if (error || !data?.length) return toast(error ? error.message : 'No se pudo cambiar');
+    toast(activar === '1' ? 'Servicio de piloto registrado' : 'Servicio de piloto quitado');
+    await cargarDatos();
+    render();
+  }));
 }
 function conectarAnular() {
   $$('[data-anular]').forEach((b) => b.addEventListener('click', () => {

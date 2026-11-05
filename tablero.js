@@ -43,11 +43,12 @@ function calcularTablero({ jornadas, gastos }) {
   const retAli = P.retencion_aliado ?? 0.04;
   const activoPorId = Object.fromEntries(S.activos.map((a) => [a.id, a]));
 
-  const vacio = () => ({ ha: 0, ingreso: 0, costoDia: 0, camioneta: 0, diesel: 0, auxiliar: 0, gastos: 0, gastosSinAsignar: 0, depBaterias: 0, depGenerador: 0, ciclos: 0, horasGen: 0, dias: 0, km: 0, trabajos: [] });
+  const vacio = () => ({ ha: 0, ingreso: 0, costoDia: 0, camioneta: 0, diesel: 0, auxiliar: 0, pilotoServicio: 0, gastos: 0, gastosSinAsignar: 0, depBaterias: 0, depGenerador: 0, ciclos: 0, horasGen: 0, dias: 0, km: 0, trabajos: [] });
   const D = Object.fromEntries(S.drones.map((d) => [d.id, vacio()]));
   const prop = (id) => S.drones.find((d) => d.id === id)?.propietario;
   const trabajos = [];
   const porFechaDron = {}; // "fecha|dron" -> trabajos
+  const PS = { dias: 0, total: 0, detalle: [] }; // días en que el aliado voló un dron de COLFOG/sociedad cobrando el día
 
   for (const j of jornadas) {
     const jds = j.jornada_drones || [];
@@ -61,7 +62,10 @@ function calcularTablero({ jornadas, gastos }) {
       const shareCam = cam / n, shareDiesel = diesel / n, shareAux = aux / n;
       d.dias += 1; d.km += km / n;
       d.camioneta += shareCam; d.diesel += shareDiesel; d.auxiliar += shareAux;
-      const share = shareCam + shareDiesel + shareAux;
+      // Piloto por servicio: el día se paga como costo del dron en que voló (no aplica al dron propio del aliado)
+      const pilotoDia = jd.piloto_servicio && prop(jd.dron_id) !== 'ALIADO' ? Number(jd.pago_piloto) || 0 : 0;
+      if (pilotoDia) { d.pilotoServicio += pilotoDia; PS.dias += 1; PS.total += pilotoDia; PS.detalle.push({ fecha: j.fecha, dron: jd.dron_id, valor: pilotoDia }); }
+      const share = shareCam + shareDiesel + shareAux + pilotoDia;
       d.costoDia += share;
       for (const l of jd.lecturas || []) {
         const a = activoPorId[l.activo_id]; if (!a || l.fin == null || !(Number(a.vida_util) > 0)) continue;
@@ -146,6 +150,9 @@ function calcularTablero({ jornadas, gastos }) {
   const colfog = suma(idsColfog, 'utilidadEconomica') + L.fijo + L.variable + C.economicaColfog;
   const aliado = suma(idsAliado, 'utilidadEconomica') + C.economicaAliado;
 
+  PS.retencion = PS.total * retAli;
+  PS.neto = PS.total - PS.retencion;
+
   // Clientes
   const clientes = {};
   for (const t of trabajos) {
@@ -153,7 +160,7 @@ function calcularTablero({ jornadas, gastos }) {
     c.ha += t.ha; c.ingreso += t.ingreso; c.n++;
   }
   return {
-    D, L, C, colfog, aliado, idsColfog, idsAliado, idsComp, trabajos, pendientes, porCategoria,
+    D, L, C, colfog, aliado, idsColfog, idsAliado, idsComp, trabajos, pendientes, porCategoria, piloto: PS,
     clientes: Object.values(clientes).sort((a, b) => b.ingreso - a.ingreso),
     sinPrecio: trabajos.filter((t) => t.sinPrecio).length,
     lecturasAbiertas: jornadas.flatMap((j) => (j.jornada_drones || []).flatMap((jd) => jd.lecturas || [])).filter((l) => l.fin == null).length
@@ -231,7 +238,7 @@ rutas.tablero = {
     try { R = calcularTablero(await cargarTablero(desde, hasta)); }
     catch (e) { return filtros + `<div class="card"><p class="note">${esc(e.message)}</p></div>`; }
     const { D, L, C } = R;
-    const admin = esAdmin();
+    const admin = esAdmin() || esConsulta(); // consulta ve el mismo tablero completo, solo de lectura
     const drones = admin ? S.drones.map((d) => d.id) : misDrones().map((d) => d.id);
     const ordenProp = { COLFOG: 0, ALIADO: 1, COMPARTIDO: 2 };
     drones.sort((x, y) => (ordenProp[S.drones.find((d) => d.id === x)?.propietario] ?? 9) - (ordenProp[S.drones.find((d) => d.id === y)?.propietario] ?? 9));
@@ -267,6 +274,7 @@ rutas.tablero = {
         filaR('Camioneta (fijo + km)', '− ' + money(x.camioneta)),
         filaR('Diésel', '− ' + money(x.diesel)),
         filaR('Auxiliar de vuelo', '− ' + money(x.auxiliar)),
+        ...(x.pilotoServicio > 0 ? [filaR('Piloto por servicio (día de trabajo)', '− ' + money(x.pilotoServicio))] : []),
         filaR('Gastos aprobados', '− ' + money(x.gastos)),
         ...(p === 'ALIADO' ? [filaR('Fijo COLFOG ($5.000/Ha)', '− ' + money(x.fijo)), filaR('Variable COLFOG (7,5%)', '− ' + money(x.variable))] : []),
         filaR('Utilidad de caja', money(x.utilidadCaja), 'sub'),
@@ -303,6 +311,15 @@ rutas.tablero = {
       </table>
       <p class="muted">Ganancias y pérdidas del mes se compensan y se reparten 50/50. Sin fijo ni variable. El desgaste de baterías y generador (${money(C.utilidadCaja - C.utilidadEconomica)}) también se reparte, pero no es caja: se usa para reponer equipos.</p></div>` : '';
 
+    const liqPiloto = R.piloto.dias ? `<div class="card"><h2>Servicio de piloto · Martin Ruiz a COLFOG</h2>
+      <table class="pyg">
+        ${R.piloto.detalle.map((t) => filaR(`${esc(fechaLarga(t.fecha))} · ${esc(t.dron)}`, money(t.valor))).join('')}
+        ${filaR(`Total (${R.piloto.dias} ${R.piloto.dias === 1 ? 'día' : 'días'})`, money(R.piloto.total), 'sub')}
+        ${filaR('Retención 4%', '− ' + money(R.piloto.retencion))}
+        ${filaR(admin ? 'Neto a pagar a Martin Ruiz' : 'Neto a recibir', money(R.piloto.neto), 'total')}
+      </table>
+      <p class="muted">Días en que voló un dron de COLFOG o de la sociedad cobrando su día de piloto. Se factura aparte de la liquidación de la sociedad. El costo ya está incluido en los gastos del dron en que voló.</p></div>` : '';
+
     const clientes = `<div class="card"><h2>Principales clientes</h2><table class="pyg"><thead><tr><th>Cliente</th><th class="num">Ha</th><th class="num">Ingreso</th></tr></thead><tbody>
       ${R.clientes.slice(0, 8).map((c) => `<tr><td>${esc(c.cliente)}</td><td class="num">${ha1(c.ha)}</td><td class="num">${compacto(c.ingreso)}</td></tr>`).join('') || '<tr><td colspan="3" class="muted">Sin trabajos en el periodo</td></tr>'}
     </tbody></table></div>`;
@@ -325,6 +342,7 @@ rutas.tablero = {
       <div class="cols">${drones.map(resultado).join('')}</div>
       ${liquidacion}
       ${liqComp}
+      ${liqPiloto}
       <div class="cols">${clientes}${gastosCat}</div>
       ${equipos}
       ${avisos}
