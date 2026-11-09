@@ -121,6 +121,8 @@ input[type="date"]::-webkit-date-and-time-value { text-align: left; min-height: 
 .reading input { min-height: 42px; padding: 8px 10px; }
 .money { font-variant-numeric: tabular-nums; }
 .photo-prev { margin-top: 8px; max-width: 100%; max-height: 220px; border-radius: 10px; display: block; }
+.ed-form { margin-top: 12px; padding-top: 4px; border-top: 1px solid var(--line); }
+.ed-form[hidden] { display: none; }
 .toast {
   position: fixed; left: 16px; right: 16px; bottom: calc(18px + env(safe-area-inset-bottom));
   max-width: 560px; margin: 0 auto; padding: 12px 14px; border-radius: 12px;

@@ -1123,7 +1123,7 @@ rutas.aprobaciones = {
 
 /* ------------------------------------------------------------------ */
 /* Cotejar gastos: valor ingresado vs. foto del recibo                 */
-/* Admin y consulta ven; solo el admin puede corregir el valor.        */
+/* Admin y consulta (Valentina) pueden editar todos los campos.       */
 /* ------------------------------------------------------------------ */
 rutas.cotejar = {
   titulo: 'Cotejar gastos',
@@ -1171,22 +1171,50 @@ rutas.cotejar = {
           <div class="t"><b>${esc(nombreCat(g.categoria))}</b> · <span class="money" data-valor>${money(g.valor)}</span> ${badgeEstado(g.estado)}</div>
           <p class="muted">${esc(g.fecha)} · ${esc(g.dron_id || 'General')} · ${esc(nombres[g.creado_por] || '')}${g.descripcion ? '<br>' + esc(g.descripcion) : ''}</p>
           ${urls[g.soporte] ? `<a href="${urls[g.soporte]}" target="_blank" rel="noopener"><img class="photo-prev" style="max-height:70vh;object-fit:contain;width:100%" src="${urls[g.soporte]}" alt="Recibo"></a><p class="muted">Toca la foto para abrirla completa y hacer zoom.</p>` : '<p class="note">Sin foto de soporte</p>'}
-          ${esAdmin() ? `<button class="btn small secondary" data-corregir="${esc(g.id)}" data-fecha="${esc(g.fecha)}" data-dron="${esc(g.dron_id || '')}" data-valor="${esc(g.valor)}">Corregir valor</button>` : ''}
+          <button class="btn small secondary" data-editar="${esc(g.id)}">Editar</button>
+          <form class="ed-form" data-form="${esc(g.id)}" hidden>
+            <div class="row">
+              <div><label>Fecha</label><input type="date" name="fecha" value="${esc(g.fecha)}" required></div>
+              <div><label>Dron</label><select name="dron">${S.drones.map((d) => `<option value="${esc(d.id)}" ${d.id === g.dron_id ? 'selected' : ''}>${esc(d.id)}</option>`).join('')}<option value="" ${g.dron_id ? '' : 'selected'}>General COLFOG</option></select></div>
+            </div>
+            <label>Categoría</label>
+            <select name="cat">${[...CATEGORIAS, ...(CATEGORIAS.some(([k]) => k === g.categoria) ? [] : [[g.categoria, g.categoria]])].map(([v, t]) => `<option value="${esc(v)}" ${v === g.categoria ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select>
+            <label>Valor ($)</label>
+            <input name="valor" inputmode="numeric" value="${esc(Math.round(Number(g.valor)).toLocaleString('es-CO'))}" required>
+            <label>Descripción</label>
+            <input name="desc" value="${esc(g.descripcion || '')}">
+            <label>Estado</label>
+            <select name="estado"><option value="pendiente" ${g.estado === 'pendiente' ? 'selected' : ''}>Pendiente</option><option value="aprobado" ${g.estado === 'aprobado' ? 'selected' : ''}>Aprobado</option><option value="rechazado" ${g.estado === 'rechazado' ? 'selected' : ''}>Rechazado</option></select>
+            <div class="row"><button class="btn secondary" type="button" data-cancelar="${esc(g.id)}">Cancelar</button><button class="btn" type="submit">Guardar</button></div>
+          </form>
         </div>`).join('');
-        $$('[data-corregir]').forEach((b) => b.addEventListener('click', async () => {
-          if (!navigator.onLine) return toast('Necesitas señal');
-          const txt = prompt(`${avisoLiquidacion(b.dataset.fecha, b.dataset.dron)}Valor correcto del gasto (hoy ${money(b.dataset.valor)}):`, String(Math.round(Number(b.dataset.valor))));
-          if (txt === null) return;
-          const nuevo = soloDigitos(txt);
-          if (!nuevo) return toast('Valor no válido');
-          if (nuevo === Math.round(Number(b.dataset.valor))) return toast('Es el mismo valor');
-          const { data: ok, error: e2 } = await sb.from('gastos').update({ valor: nuevo }).eq('id', b.dataset.corregir).select('id');
-          if (e2 || !ok?.length) return toast(e2 ? msgError(e2) : 'No se pudo guardar');
-          b.dataset.valor = nuevo;
-          b.closest('[data-id]').querySelector('[data-valor]').textContent = money(nuevo);
-          toast('Valor corregido');
-          cargarDatos();
+        const porId = Object.fromEntries(data.map((g) => [g.id, g]));
+        $$('[data-editar]').forEach((b) => b.addEventListener('click', () => {
+          const f = document.querySelector(`[data-form="${b.dataset.editar}"]`);
+          f.hidden = !f.hidden;
         }));
+        $$('[data-cancelar]').forEach((b) => b.addEventListener('click', () => { document.querySelector(`[data-form="${b.dataset.cancelar}"]`).hidden = true; }));
+        $$('.ed-form').forEach((f) => {
+          f.elements.valor.addEventListener('input', (e) => { const n = soloDigitos(e.target.value); e.target.value = n ? n.toLocaleString('es-CO') : ''; });
+          f.addEventListener('submit', async (ev) => {
+            ev.preventDefault();
+            if (!navigator.onLine) return toast('Necesitas señal');
+            const g = porId[f.dataset.form];
+            const valor = soloDigitos(f.elements.valor.value);
+            if (!valor) return toast('Ingresa el valor');
+            const cambios = { fecha: f.elements.fecha.value, dron_id: f.elements.dron.value || null, categoria: f.elements.cat.value, descripcion: f.elements.desc.value.trim() || null, valor, estado: f.elements.estado.value };
+            const igual = cambios.fecha === g.fecha && cambios.dron_id === (g.dron_id || null) && cambios.categoria === g.categoria && cambios.descripcion === (g.descripcion || null) && valor === Math.round(Number(g.valor)) && cambios.estado === g.estado;
+            if (igual) return toast('No hay cambios');
+            const afecta = cambios.valor !== Math.round(Number(g.valor)) || cambios.fecha !== g.fecha || cambios.dron_id !== (g.dron_id || null) || cambios.categoria !== g.categoria || cambios.estado !== g.estado;
+            if (afecta && !confirm(`${avisoLiquidacion(g.fecha, g.dron_id)}${cambios.fecha !== g.fecha ? avisoLiquidacion(cambios.fecha, cambios.dron_id) : ''}¿Guardar los cambios?`)) return;
+            if (cambios.estado !== g.estado) cambios.revisado_por = cambios.estado === 'pendiente' ? null : S.user.id;
+            const { data: ok, error: e2 } = await sb.from('gastos').update(cambios).eq('id', g.id).select('id');
+            if (e2 || !ok?.length) return toast(e2 ? msgError(e2) : 'No se pudo guardar. ¿Tienes permiso?');
+            toast('Gasto actualizado');
+            cargarDatos();
+            buscar();
+          });
+        });
       } catch (err) {
         box.innerHTML = `<div class="card"><p class="note">${esc(err.message || String(err))}</p></div>`;
       }
