@@ -117,7 +117,7 @@ const S = {
 };
 const esAdmin = () => S.perfil?.rol === 'admin';
 const esAliado = () => S.perfil?.rol === 'aliado';
-const esConsulta = () => S.perfil?.rol === 'consulta';   // gerente administrativa: solo lee y descarga Excel
+const esConsulta = () => S.perfil?.rol === 'consulta';   // gerente administrativa: lee, descarga Excel, registra gastos y (con permiso) aprueba gastos de otros
 const veDinero = () => esAdmin() || esAliado() || esConsulta();
 // Aprueba o rechaza gastos: el admin siempre; consulta solo si el admin le activó el permiso (perfiles.puede_aprobar)
 const puedeAprobar = () => esAdmin() || (esConsulta() && !!S.perfil?.puede_aprobar);
@@ -296,11 +296,29 @@ function conectarFoto(id) {
 /* ------------------------------------------------------------------ */
 /* Precios                                                             */
 /* ------------------------------------------------------------------ */
-function precioSugerido({ tipo, litros, precioId, ha, dron }) {
+/* Tarifas especiales por cliente (aspersión): entre litros_min y litros_max L/Ha se cobra valor_ha */
+const TARIFAS_CLIENTE = [
+  { clientes: ['royal avocado', 'agricolas ara', 'agricola ara'], litros_min: 100, litros_max: 150, valor_ha: 200000 }
+];
+const normaCliente = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim();
+function tarifaCliente(cliente, litros) {
+  const c = normaCliente(cliente);
+  if (!c || litros == null) return null;
+  return TARIFAS_CLIENTE.find((t) => litros >= t.litros_min && litros <= t.litros_max && t.clientes.some((n) => c.includes(n))) || null;
+}
+
+function precioSugerido({ tipo, litros, precioId, ha, dron, cliente }) {
   if (!S.precios.length) return null;
   if (tipo === 'mapeo') {
     const h = Number(ha) || 0;
     return { total: 700000 + Math.max(0, h - 70) * 10000, detalle: 'Mapeo: $700.000 primeras 70 Ha + $10.000/Ha adicional' };
+  }
+  if (tipo === 'aspersion' || tipo == null) {
+    const tc = tarifaCliente(cliente, litros);
+    if (tc) {
+      const h = Number(ha) || 0;
+      return { total: tc.valor_ha * h, porHa: tc.valor_ha, detalle: `Tarifa especial ${tc.litros_min} a ${tc.litros_max} L/Ha` };
+    }
   }
   let p;
   if (tipo === 'paquete') p = S.precios.find((x) => x.id === precioId);
@@ -399,7 +417,7 @@ rutas.inicio = {
     const nDup = dupG.trabajos.length + dupG.gastos.length;
     return `
       <div class="hello"><span class="muted">${esc(fechaLarga(f))}</span><strong>Hola, ${esc((S.perfil?.nombre || S.user?.email || '').split(' ')[0])}</strong></div>
-      ${esConsulta() ? '' : `<button class="action checklist-btn" data-go="checklist"><b>✓ Checklist de salida</b><span>Verifica equipos e insumos antes de salir al trabajo</span></button>
+      ${esConsulta() ? `<button class="action primary" data-go="gasto"><b>Registrar gasto</b><span>Con foto del soporte</span></button>` : `<button class="action checklist-btn" data-go="checklist"><b>✓ Checklist de salida</b><span>Verifica equipos e insumos antes de salir al trabajo</span></button>
       <div class="grid-actions">
         <button class="action primary" data-go="jornada"><b>Iniciar jornada</b><span>Km, baterías, generador</span></button>
         <button class="action" data-go="trabajo"><b>Registrar trabajo</b><span>Cliente, Ha, litros</span></button>
@@ -419,7 +437,7 @@ rutas.inicio = {
       <div class="card"><h2>Registros</h2><ul class="list">
         <li><div><div class="t">Jornadas y trabajos</div><div class="muted">Últimos 45 días</div></div><button class="btn small secondary" data-go="registros">Ver</button></li>
         <li><div><div class="t">Mis gastos</div><div class="muted">Estado de aprobación</div></div><button class="btn small secondary" data-go="gastos">Ver</button></li>
-        ${esConsulta() ? '' : '<li><div><div class="t">Pendientes por subir</div><div class="muted">Se suben solos al tener señal</div></div><button class="btn small secondary" data-go="cola">Ver</button></li>'}
+        ${'<li><div><div class="t">Pendientes por subir</div><div class="muted">Se suben solos al tener señal</div></div><button class="btn small secondary" data-go="cola">Ver</button></li>'}
       </ul></div>
       <div class="footer-links"><span class="muted">v${esc(CFG.APP_VERSION)} · ${esc(S.perfil?.rol || '')}</span><button class="linklike" id="salir">Cerrar sesión</button></div>`;
   },
@@ -738,12 +756,12 @@ rutas.trabajo = {
       $('#campo-litros').hidden = tipo === 'mapeo';
       if (tipo === 'mapeo' && $('#dron').value !== 'T55') $('#dron').value = 'T55';
       if (!veDinero()) return;
-      const p = precioSugerido({ tipo, litros: num($('#litros').value), precioId: $('#paquete').value, ha: num($('#ha').value), dron: $('#dron').value });
+      const p = precioSugerido({ tipo, litros: num($('#litros').value), precioId: $('#paquete').value, ha: num($('#ha').value), dron: $('#dron').value, cliente: $('#cliente').value });
       const v = $('#valor');
       if (p && p.total > 0) { v.hidden = false; v.innerHTML = `Valor estimado: <b class="money">${money(p.total)}</b><br><span class="muted">${esc(p.detalle)}${p.porHa ? ' · ' + money(p.porHa) + '/Ha' : ''}</span>`; }
       else v.hidden = true;
     };
-    ['tipo', 'litros', 'ha', 'paquete', 'dron'].forEach((id) => $('#' + id)?.addEventListener('input', upd));
+    ['tipo', 'litros', 'ha', 'paquete', 'dron', 'cliente'].forEach((id) => $('#' + id)?.addEventListener('input', upd));
     $('#paquete')?.addEventListener('change', () => {
       const p = S.precios.find((x) => x.id === $('#paquete').value);
       if (p?.litros_min) $('#litros').value = p.litros_min;
@@ -885,7 +903,7 @@ rutas.gasto = {
         <div><label for="fecha">Fecha</label><input id="fecha" type="date" value="${hoy()}" required></div>
         <div><label for="dron">Dron</label><select id="dron">
           ${mis.map((d) => `<option value="${d.id}" ${d.id === def ? 'selected' : ''}>${esc(d.id)}</option>`).join('')}
-          ${esAdmin() ? '<option value="">General COLFOG</option>' : ''}
+          ${esAdmin() || esConsulta() ? '<option value="">General COLFOG</option>' : ''}
         </select></div>
       </div>
       <label for="cat">Categoría</label>
@@ -895,7 +913,7 @@ rutas.gasto = {
       <label for="desc">Descripción</label>
       <input id="desc" placeholder="Ej: almuerzo 2 personas, Aguadas">
       ${campoFoto('foto', 'Foto del soporte (factura o recibo)')}
-      ${esAdmin() ? '' : '<p class="muted">COLFOG revisa el soporte y aprueba el gasto antes de la liquidación.</p>'}
+      ${esAdmin() ? '' : `<p class="muted">${esConsulta() ? 'El administrador' : 'COLFOG'} revisa el soporte y aprueba el gasto antes de la liquidación.</p>`}
     </div><button class="btn" type="submit">Guardar gasto</button></form>`;
   },
   init: () => {
@@ -1038,7 +1056,7 @@ rutas.gastos = {
     const lista = esAdmin() || esConsulta() ? S.gastos : S.gastos.filter((g) => g.creado_por === S.user.id || misDrones().some((d) => d.id === g.dron_id));
     if (!lista.length) return '<div class="card"><p class="muted">No hay gastos en los últimos 45 días.</p></div>';
     return `<div class="card"><ul class="list">${lista.map((g) => `<li><div><div class="t">${esc(nombreCat(g.categoria))} · <span class="money">${money(g.valor)}</span></div>
-      <div class="muted">${esc(g.fecha)} · ${esc(g.dron_id || 'General')}${g.descripcion ? ' · ' + esc(g.descripcion) : ''}</div></div><div class="stack">${badgeEstado(g.estado)}${esAdmin() ? `<button class="btn small danger" data-anular="gastos:${esc(g.id)}:${esc(g.fecha)}:${esc(g.dron_id || '')}">Anular</button>` : ''}</div></li>`).join('')}</ul></div>`;
+      <div class="muted">${esc(g.fecha)} · ${esc(g.dron_id || 'General')}${g.descripcion ? ' · ' + esc(g.descripcion) : ''}</div></div><div class="stack">${badgeEstado(g.estado)}${esAdmin() || (esConsulta() && g.creado_por === S.user.id && g.estado === 'pendiente' && !g.anulado) ? `<button class="btn small danger" data-anular="gastos:${esc(g.id)}:${esc(g.fecha)}:${esc(g.dron_id || '')}">Anular</button>` : ''}</div></li>`).join('')}</ul></div>`;
   },
   init: () => conectarAnular()
 };
@@ -1069,7 +1087,7 @@ rutas.aprobaciones = {
     if (!puedeAprobar()) return '<div class="card"><p class="muted">No tienes permiso para aprobar gastos.</p></div>';
     if (!navigator.onLine) return '<div class="card"><p class="note">Necesitas señal para aprobar gastos.</p></div>';
     const { data: bruto, error } = await sb.from('gastos').select('*').eq('estado', 'pendiente').order('fecha');
-    const data = (bruto || []).filter((g) => !g.anulado);
+    const data = (bruto || []).filter((g) => !g.anulado && !(esConsulta() && g.creado_por === S.user.id)); // consulta no aprueba sus propios gastos
     if (error) return `<div class="card"><p class="note">${esc(error.message)}</p></div>`;
     if (!data.length) return '<div class="card"><p>No hay gastos pendientes.</p></div>';
     const nombres = Object.fromEntries(S.perfiles.map((p) => [p.id, p.nombre]));

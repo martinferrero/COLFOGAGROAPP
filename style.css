@@ -83,7 +83,11 @@ input, select, textarea {
 input:focus, select:focus, textarea:focus { outline: 2px solid var(--brand); outline-offset: 1px; }
 textarea { min-height: 70px; }
 .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.row > div { min-width: 0; }
 .row > div label { margin-top: 12px; }
+/* iOS Safari: el campo de fecha trae un ancho mínimo propio y se montaba sobre la casilla vecina */
+input[type="date"] { -webkit-appearance: none; appearance: none; min-width: 0; max-width: 100%; text-align: left; display: block; }
+input[type="date"]::-webkit-date-and-time-value { text-align: left; min-height: 1.2em; }
 .check { display: flex; align-items: center; gap: 10px; font-weight: 500; margin: 10px 0; }
 .check input { width: 22px; height: 22px; min-height: 0; }
 .chips { display: flex; flex-wrap: wrap; gap: 8px; }

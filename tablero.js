@@ -76,7 +76,7 @@ function calcularTablero({ jornadas, gastos }) {
       const ts = jd.trabajos || [];
       const haTot = ts.reduce((s, t) => s + Number(t.ha), 0);
       for (const t of ts) {
-        const p = precioSugerido({ tipo: t.tipo_servicio, litros: t.litros_ha == null ? null : Number(t.litros_ha), precioId: t.precio_id, ha: t.ha });
+        const p = precioSugerido({ tipo: t.tipo_servicio, litros: t.litros_ha == null ? null : Number(t.litros_ha), precioId: t.precio_id, ha: t.ha, cliente: t.cliente });
         const r = {
           ...t, fecha: j.fecha, dron: jd.dron_id, ha: Number(t.ha),
           ingreso: p?.total || 0, sinPrecio: !p,
