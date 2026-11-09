@@ -122,9 +122,9 @@ async function generarExcel(desde, hasta) {
 
   /* 3. Gastos (todos los estados; los anulados van en su propia hoja) */
   XL.utils.book_append_sheet(wb, hojaTabla(XL, [
-    ['Fecha', 'Dron', 'Categoría', 'Descripción', 'Valor', 'Estado', 'Registrado por', 'Revisado por', 'Con soporte (foto)', 'Creado'],
-    ...gastos.map((g) => [aFecha(g.fecha), g.dron_id || 'General', nombreCat(g.categoria), g.descripcion || '', Number(g.valor), g.estado, nom(g.creado_por), nom(g.revisado_por), g.soporte ? 'Sí' : 'No', aFechaHora(g.created_at)])
-  ], { fecha: [0], dinero: [4], fechaHora: [9], anchos: [12, 10, 30, 36, 14, 12, 22, 22, 16, 17] }), 'Gastos');
+    ['Fecha', 'Dron', 'Categoría', 'Descripción', 'Valor', 'Estado', 'Registrado por', 'Revisado por', 'Con soporte (foto)', 'Creado', 'ID'],
+    ...gastos.map((g) => [aFecha(g.fecha), g.dron_id || 'General', nombreCat(g.categoria), g.descripcion || '', Number(g.valor), g.estado, nom(g.creado_por), nom(g.revisado_por), g.soporte ? 'Sí' : 'No', aFechaHora(g.created_at), g.id])
+  ], { fecha: [0], dinero: [4], fechaHora: [9], anchos: [12, 10, 30, 36, 14, 12, 22, 22, 16, 17, 38] }), 'Gastos');
 
   /* 4. Jornadas */
   XL.utils.book_append_sheet(wb, hojaTabla(XL, [
@@ -221,3 +221,216 @@ rutas.exportar = {
     });
   }
 };
+
+
+/* ------------------------------------------------------------------ */
+/* Importar gastos desde Excel (solo admin)                            */
+/* - Fila SIN ID  -> gasto nuevo                                       */
+/* - Fila CON ID  -> actualiza ese gasto (el ID sale del Excel que     */
+/*   descarga la app, hoja "Gastos", última columna)                   */
+/* ------------------------------------------------------------------ */
+const normTxt = (s) => String(s ?? '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+const ESTADOS_IMP = { pendiente: 'pendiente', aprobado: 'aprobado', aprobada: 'aprobado', rechazado: 'rechazado', rechazada: 'rechazado' };
+
+function categoriaDesde(txt) {
+  const n = normTxt(txt);
+  if (!n) return null;
+  for (const [k, label] of CATEGORIAS) {
+    if (n === normTxt(k) || n === normTxt(label) || n === normTxt(label.replace(/\s*\(.*\)/, ''))) return k;
+  }
+  if (n.includes('poliza') || n.includes('seguro')) return 'polizas';
+  if (n.includes('administrativ')) return 'administrativo';
+  return null;
+}
+function fechaDesde(v, XL) {
+  if (v == null || v === '') return null;
+  if (v instanceof Date) return `${v.getFullYear()}-${String(v.getMonth() + 1).padStart(2, '0')}-${String(v.getDate()).padStart(2, '0')}`;
+  if (typeof v === 'number') { const d = XL.SSF.parse_date_code(v); return d ? `${d.y}-${String(d.m).padStart(2, '0')}-${String(d.d).padStart(2, '0')}` : null; }
+  const t = String(v).trim();
+  let m = t.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (m) return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
+  m = t.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{4})$/); // día/mes/año (formato Colombia)
+  if (m) return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+  return null;
+}
+function valorDesde(v) {
+  if (typeof v === 'number') return Math.round(v);
+  const t = String(v ?? '').replace(/[^\d.,-]/g, '');
+  if (!t) return 0;
+  return Math.round(Number(t.replace(/[.,](?=\d{3}(\D|$))/g, '').replace(',', '.'))) || 0;
+}
+
+let IMP = null; // filas listas para importar
+async function leerExcelGastos(file) {
+  await cargarXLSX();
+  const XL = window.XLSX;
+  const wb = XL.read(await file.arrayBuffer(), { type: 'array' });
+  const nombre = wb.SheetNames.find((n) => normTxt(n) === 'gastos') || wb.SheetNames[0];
+  const filas = XL.utils.sheet_to_json(wb.Sheets[nombre], { header: 1, defval: '', raw: true });
+  const iCab = filas.findIndex((f) => f.some((c) => normTxt(c) === 'valor') && f.some((c) => normTxt(c) === 'fecha'));
+  if (iCab < 0) throw new Error('No encontré las columnas "Fecha" y "Valor". Usa la plantilla o el Excel descargado de la app (hoja "Gastos").');
+  const col = {};
+  filas[iCab].forEach((c, i) => {
+    const n = normTxt(c);
+    if (n === 'fecha') col.fecha = i;
+    else if (n === 'dron') col.dron = i;
+    else if (n === 'categoria') col.cat = i;
+    else if (n === 'descripcion') col.desc = i;
+    else if (n === 'valor') col.valor = i;
+    else if (n === 'estado') col.estado = i;
+    else if (n === 'id') col.id = i;
+  });
+  const dronesOk = Object.fromEntries(S.drones.map((d) => [normTxt(d.id), d.id]));
+  const out = [];
+  filas.slice(iCab + 1).forEach((f, k) => {
+    if (f.every((c) => c === '' || c == null)) return;
+    const g = (i) => (i == null ? '' : f[i]);
+    const errores = [], avisos = [];
+    const fecha = fechaDesde(g(col.fecha), XL);
+    if (!fecha) errores.push('Fecha no válida');
+    const valor = valorDesde(g(col.valor));
+    if (!valor || valor < 0) errores.push('Valor vacío o en cero');
+    const dTxt = normTxt(g(col.dron));
+    let dron_id = null;
+    if (dTxt && !dTxt.startsWith('general')) {
+      dron_id = dronesOk[dTxt] || null;
+      if (!dron_id) errores.push(`Dron "${g(col.dron)}" no existe`);
+    }
+    let desc = String(g(col.desc) ?? '').trim();
+    let categoria = categoriaDesde(g(col.cat));
+    if (!categoria) {
+      categoria = 'otro';
+      if (String(g(col.cat)).trim()) { avisos.push(`Categoría "${g(col.cat)}" no existe: queda como "Otro"`); desc = desc ? `${g(col.cat)} · ${desc}` : String(g(col.cat)).trim(); }
+      else avisos.push('Sin categoría: queda como "Otro"');
+    }
+    const estadoTxt = normTxt(g(col.estado));
+    const estado = ESTADOS_IMP[estadoTxt] || null; // si va vacío se usa el estado elegido en pantalla
+    const id = String(g(col.id) ?? '').trim() || null;
+    out.push({ n: iCab + k + 2, fecha, dron_id, categoria, descripcion: desc || null, valor, estado, id, errores, avisos });
+  });
+  return out;
+}
+
+rutas.importar = {
+  titulo: 'Importar gastos',
+  html: () => {
+    if (!esAdmin()) return '<div class="card"><p class="muted">Esta opción es solo para el administrador.</p></div>';
+    return `<div class="card"><h2>Cargar gastos desde Excel</h2>
+      <p class="muted">Sirve para gastos que ya están completos (pólizas, gastos administrativos, etc.). El archivo necesita las columnas <b>Fecha, Dron, Categoría, Descripción, Valor</b> (y opcionalmente <b>Estado</b>). Si <b>Dron</b> va vacío o dice "General", queda como gasto general de COLFOG.</p>
+      <p class="muted">Filas <b>sin ID</b> crean gastos nuevos. Filas <b>con ID</b> actualizan ese gasto: el ID viene en la última columna de la hoja "Gastos" del Excel que descargas en esta app.</p>
+      <button class="btn secondary" id="i-plantilla" type="button">Descargar plantilla</button>
+      <label for="i-archivo">Archivo de Excel (.xlsx)</label>
+      <input id="i-archivo" type="file" accept=".xlsx,.xls,.csv">
+      ${navigator.onLine ? '' : '<p class="note">Necesitas señal para importar.</p>'}
+    </div>
+    <div id="i-previa"></div>`;
+  },
+  init: () => {
+    $('#i-plantilla').addEventListener('click', async () => {
+      await cargarXLSX();
+      const XL = window.XLSX;
+      const wb = XL.utils.book_new();
+      const hoja = XL.utils.aoa_to_sheet([
+        ['Fecha', 'Dron', 'Categoría', 'Descripción', 'Valor', 'Estado', 'ID'],
+        [new Date().toISOString().slice(0, 10), 'General', 'Pólizas y seguros', 'Ejemplo: póliza todo riesgo T55', 1500000, 'aprobado', '']
+      ]);
+      hoja['!cols'] = [{ wch: 12 }, { wch: 12 }, { wch: 30 }, { wch: 40 }, { wch: 14 }, { wch: 12 }, { wch: 38 }];
+      XL.utils.book_append_sheet(wb, hoja, 'Gastos');
+      XL.utils.book_append_sheet(wb, XL.utils.aoa_to_sheet([['Categorías válidas'], ...CATEGORIAS.map(([, t]) => [t]), [], ['Drones válidos (o General)'], ...S.drones.map((d) => [d.id])]), 'Listas');
+      XL.writeFile(wb, 'plantilla_importar_gastos.xlsx');
+    });
+    $('#i-archivo').addEventListener('change', async (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      const box = $('#i-previa');
+      box.innerHTML = '<div class="card"><p class="muted">Leyendo archivo…</p></div>';
+      try {
+        const filas = await leerExcelGastos(file);
+        if (!filas.length) { box.innerHTML = '<div class="card"><p class="note">El archivo no tiene filas con datos.</p></div>'; return; }
+        // Revisa contra lo ya guardado: duplicados (nuevos) y existencia del ID (actualizaciones)
+        const fechas = filas.map((f) => f.fecha).filter(Boolean).sort();
+        const { data: ex, error } = await sb.from('gastos').select('*').gte('fecha', fechas[0] || '2000-01-01').lte('fecha', fechas[fechas.length - 1] || '2100-01-01');
+        if (error) throw error;
+        if ((ex || []).length >= 1000) throw new Error('Hay más de 1.000 gastos en ese rango de fechas. Divide el archivo por periodos.');
+        const porId = Object.fromEntries((ex || []).map((g) => [g.id, g]));
+        const llave = (g) => [g.fecha, g.dron_id || '', g.categoria, Math.round(Number(g.valor)), normTxt(g.descripcion)].join('|');
+        const existentes = new Set((ex || []).filter((g) => !g.anulado).map(llave));
+        for (const f of filas) {
+          if (f.id) {
+            if (!porId[f.id]) f.errores.push('El ID no existe en la base (¿lo borraste o es de otro rango?)');
+            else { f.antes = porId[f.id]; f.accion = 'actualiza'; }
+          } else {
+            f.accion = 'nuevo';
+            if (!f.errores.length && existentes.has(llave(f))) { f.duplicado = true; f.avisos.push('Ya existe un gasto igual (misma fecha, dron, categoría, valor y descripción)'); }
+          }
+        }
+        IMP = filas;
+        pintarPrevia();
+      } catch (err) {
+        box.innerHTML = `<div class="card"><p class="note">${esc(err.message || String(err))}</p></div>`;
+      }
+    });
+  }
+};
+
+function pintarPrevia() {
+  const box = $('#i-previa');
+  const marcable = (f) => !f.errores.length;
+  const items = IMP.map((f, i) => {
+    const badge = f.errores.length ? '<span class="badge danger">Error</span>' : f.duplicado ? '<span class="badge warn">Posible duplicado</span>' : f.accion === 'actualiza' ? '<span class="badge">Actualiza</span>' : '<span class="badge">Nuevo</span>';
+    const marca = marcable(f) ? `<input type="checkbox" data-i="${i}" ${f.duplicado ? '' : 'checked'}>` : '';
+    return `<li><div class="check" style="margin:0">${marca}<div><div class="t">${esc(f.fecha || '—')} · ${esc(f.dron_id || 'General')} · <span class="money">${money(f.valor)}</span></div>
+      <div class="muted">${esc(nombreCat(f.categoria))}${f.descripcion ? ' · ' + esc(f.descripcion) : ''} <span class="muted">(fila ${f.n})</span></div>
+      ${[...f.errores.map((x) => `<div class="note">${esc(x)}</div>`), ...f.avisos.map((x) => `<div class="muted">⚠ ${esc(x)}</div>`)].join('')}</div></div>${badge}</li>`;
+  }).join('');
+  box.innerHTML = `<div class="card"><h2>Revisa antes de importar</h2>
+    <label for="i-estado">Estado para las filas que no traen Estado</label>
+    <select id="i-estado"><option value="aprobado">Aprobado (cuenta en el tablero)</option><option value="pendiente">Pendiente de aprobación</option></select>
+    <ul class="list">${items}</ul>
+    <p class="muted" id="i-resumen"></p>
+    <button class="btn" id="i-importar">Importar</button></div>`;
+  const resumen = () => {
+    const sel = $$('#i-previa [data-i]:checked').map((c) => IMP[Number(c.dataset.i)]);
+    const total = sel.reduce((s, f) => s + f.valor, 0);
+    $('#i-resumen').innerHTML = `${sel.length} fila(s) seleccionadas · ${sel.filter((f) => f.accion === 'nuevo').length} nuevas, ${sel.filter((f) => f.accion === 'actualiza').length} actualizaciones · Total <b>${money(total)}</b>${IMP.some((f) => f.errores.length) ? '<br>Las filas con error no se importan: corrígelas en el Excel y súbelo de nuevo.' : ''}`;
+    $('#i-importar').disabled = !sel.length;
+  };
+  $$('#i-previa [data-i]').forEach((c) => c.addEventListener('change', resumen));
+  resumen();
+  $('#i-importar').addEventListener('click', async (e) => {
+    if (!navigator.onLine) return toast('Necesitas señal para importar');
+    const sel = $$('#i-previa [data-i]:checked').map((c) => IMP[Number(c.dataset.i)]);
+    if (!sel.length) return;
+    const porDefecto = $('#i-estado').value;
+    if (!confirm(`Se van a guardar ${sel.length} gasto(s). ¿Continuar?`)) return;
+    const btn = e.currentTarget; btn.disabled = true; btn.textContent = 'Importando…';
+    let nuevos = 0, actualizados = 0;
+    try {
+      const filasNuevas = sel.filter((f) => f.accion === 'nuevo').map((f) => {
+        const estado = f.estado || porDefecto;
+        return { id: uuid(), fecha: f.fecha, dron_id: f.dron_id, categoria: f.categoria, descripcion: f.descripcion, valor: f.valor, estado, revisado_por: estado === 'pendiente' ? null : S.user.id };
+      });
+      if (filasNuevas.length) {
+        const { error } = await sb.from('gastos').insert(filasNuevas);
+        if (error) throw error;
+        nuevos = filasNuevas.length;
+      }
+      for (const f of sel.filter((x) => x.accion === 'actualiza')) {
+        const estado = f.estado || f.antes.estado; // al actualizar, sin Estado en el Excel se conserva el actual
+        const cambios = { fecha: f.fecha, dron_id: f.dron_id, categoria: f.categoria, descripcion: f.descripcion, valor: f.valor, estado };
+        if (estado !== f.antes.estado) cambios.revisado_por = estado === 'pendiente' ? null : S.user.id;
+        const { data, error } = await sb.from('gastos').update(cambios).eq('id', f.id).select('id');
+        if (error) throw error;
+        if (!data?.length) throw new Error(`No se pudo actualizar la fila ${f.n}`);
+        actualizados++;
+      }
+      toast(`Importado: ${nuevos} nuevo(s), ${actualizados} actualizado(s)`, 5000);
+      IMP = null;
+      await cargarDatos();
+      ir('inicio', {}, true);
+    } catch (err) {
+      btn.disabled = false; btn.textContent = 'Importar';
+      alert(`Se detuvo la importación: ${err.message || err}\n\nSe alcanzaron a guardar ${nuevos} nuevo(s) y ${actualizados} actualizado(s). Vuelve a subir el archivo: los ya guardados aparecerán como duplicados y quedan sin marcar.`);
+    }
+  });
+}

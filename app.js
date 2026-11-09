@@ -432,10 +432,13 @@ rutas.inicio = {
       </ul></div>` : ''}
       ${esAdmin() ? `<div class="card"><h2>Administración</h2><ul class="list">
         <li><div><div class="t">Gastos por aprobar</div><div class="muted">Revisa soportes del aliado y pilotos</div></div><button class="btn small" data-go="aprobaciones">${pendientes}</button></li>
+        <li><div><div class="t">Cotejar gastos</div><div class="muted">Valor ingresado vs. foto del recibo</div></div><button class="btn small secondary" data-go="cotejar">Abrir</button></li>
+        <li><div><div class="t">Importar gastos desde Excel</div><div class="muted">Carga o actualiza gastos completos (pólizas, administrativos…)</div></div><button class="btn small secondary" data-go="importar">Abrir</button></li>
         <li><div><div class="t">Posibles duplicados</div><div class="muted">Trabajos o gastos registrados dos veces</div></div><button class="btn small ${nDup ? '' : 'secondary'}" data-go="duplicados">${nDup}</button></li>
       </ul></div>` : ''}
       <div class="card"><h2>Registros</h2><ul class="list">
         <li><div><div class="t">Jornadas y trabajos</div><div class="muted">Últimos 45 días</div></div><button class="btn small secondary" data-go="registros">Ver</button></li>
+        ${esConsulta() ? '<li><div><div class="t">Cotejar gastos</div><div class="muted">Valor ingresado vs. foto del recibo</div></div><button class="btn small secondary" data-go="cotejar">Abrir</button></li>' : ''}
         <li><div><div class="t">Mis gastos</div><div class="muted">Estado de aprobación</div></div><button class="btn small secondary" data-go="gastos">Ver</button></li>
         ${'<li><div><div class="t">Pendientes por subir</div><div class="muted">Se suben solos al tener señal</div></div><button class="btn small secondary" data-go="cola">Ver</button></li>'}
       </ul></div>
@@ -890,6 +893,8 @@ const CATEGORIAS = [
   ['producto', 'Producto paquete Multiseres'],
   ['repuestos', 'Repuestos dron'],
   ['mantenimiento', 'Mantenimiento'],
+  ['polizas', 'Pólizas y seguros'],
+  ['administrativo', 'Gastos administrativos'],
   ['otro', 'Otro']
 ];
 const nombreCat = (c) => (CATEGORIAS.find((x) => x[0] === c) || [c, c])[1];
@@ -1113,6 +1118,81 @@ rutas.aprobaciones = {
       toast(b.dataset.accion === 'aprobado' ? 'Gasto aprobado' : 'Gasto rechazado');
       cargarDatos();
     }));
+  }
+};
+
+/* ------------------------------------------------------------------ */
+/* Cotejar gastos: valor ingresado vs. foto del recibo                 */
+/* Admin y consulta ven; solo el admin puede corregir el valor.        */
+/* ------------------------------------------------------------------ */
+rutas.cotejar = {
+  titulo: 'Cotejar gastos',
+  html: () => {
+    if (!(esAdmin() || esConsulta())) return '<div class="card"><p class="muted">Esta opción es para COLFOG.</p></div>';
+    const d = new Date(); const ini = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-01`;
+    return `<div class="card"><h2>Valor ingresado vs. recibo</h2>
+      <div class="row">
+        <div><label for="c-desde">Desde</label><input id="c-desde" type="date" value="${ini}"></div>
+        <div><label for="c-hasta">Hasta</label><input id="c-hasta" type="date" value="${hoy()}"></div>
+      </div>
+      <div class="row">
+        <div><label for="c-estado">Estado</label><select id="c-estado"><option value="">Todos</option><option value="pendiente">Pendiente</option><option value="aprobado">Aprobado</option><option value="rechazado">Rechazado</option></select></div>
+        <div><label for="c-foto">Foto</label><select id="c-foto"><option value="">Todos</option><option value="con">Con foto</option><option value="sin">Sin foto</option></select></div>
+      </div>
+      ${navigator.onLine ? '' : '<p class="note">Necesitas señal para ver las fotos.</p>'}
+      <button class="btn" id="c-buscar" ${navigator.onLine ? '' : 'disabled'}>Buscar</button>
+    </div><div id="c-lista"></div>`;
+  },
+  init: () => {
+    const buscar = async () => {
+      const box = $('#c-lista');
+      const desde = $('#c-desde').value, hasta = $('#c-hasta').value;
+      if (!desde || !hasta || desde > hasta) return toast('Revisa las fechas');
+      box.innerHTML = '<div class="card"><p class="muted">Buscando…</p></div>';
+      try {
+        let q = sb.from('gastos').select('*').gte('fecha', desde).lte('fecha', hasta).order('fecha', { ascending: false });
+        if ($('#c-estado').value) q = q.eq('estado', $('#c-estado').value);
+        const { data: bruto, error } = await q;
+        if (error) throw error;
+        if ((bruto || []).length >= 1000) toast('Hay más de 1.000 gastos: acota las fechas', 5000);
+        let data = (bruto || []).filter((g) => !g.anulado);
+        if ($('#c-foto').value === 'con') data = data.filter((g) => g.soporte);
+        if ($('#c-foto').value === 'sin') data = data.filter((g) => !g.soporte);
+        if (!data.length) { box.innerHTML = '<div class="card"><p class="muted">No hay gastos con ese filtro.</p></div>'; return; }
+        const urls = {};
+        const rutasFoto = data.filter((g) => g.soporte).map((g) => g.soporte);
+        for (let i = 0; i < rutasFoto.length; i += 100) {
+          const { data: s } = await sb.storage.from('soportes').createSignedUrls(rutasFoto.slice(i, i + 100), 3600);
+          for (const x of s || []) urls[x.path] = x.signedUrl;
+        }
+        const nombres = Object.fromEntries(S.perfiles.map((p) => [p.id, p.nombre]));
+        const total = data.reduce((t, g) => t + Number(g.valor), 0);
+        box.innerHTML = `<p class="muted">${data.length} gasto(s) · Total ingresado <b>${money(total)}</b></p>` + data.map((g) => `<div class="card" data-id="${esc(g.id)}">
+          <div class="t"><b>${esc(nombreCat(g.categoria))}</b> · <span class="money" data-valor>${money(g.valor)}</span> ${badgeEstado(g.estado)}</div>
+          <p class="muted">${esc(g.fecha)} · ${esc(g.dron_id || 'General')} · ${esc(nombres[g.creado_por] || '')}${g.descripcion ? '<br>' + esc(g.descripcion) : ''}</p>
+          ${urls[g.soporte] ? `<a href="${urls[g.soporte]}" target="_blank" rel="noopener"><img class="photo-prev" style="max-height:70vh;object-fit:contain;width:100%" src="${urls[g.soporte]}" alt="Recibo"></a><p class="muted">Toca la foto para abrirla completa y hacer zoom.</p>` : '<p class="note">Sin foto de soporte</p>'}
+          ${esAdmin() ? `<button class="btn small secondary" data-corregir="${esc(g.id)}" data-fecha="${esc(g.fecha)}" data-dron="${esc(g.dron_id || '')}" data-valor="${esc(g.valor)}">Corregir valor</button>` : ''}
+        </div>`).join('');
+        $$('[data-corregir]').forEach((b) => b.addEventListener('click', async () => {
+          if (!navigator.onLine) return toast('Necesitas señal');
+          const txt = prompt(`${avisoLiquidacion(b.dataset.fecha, b.dataset.dron)}Valor correcto del gasto (hoy ${money(b.dataset.valor)}):`, String(Math.round(Number(b.dataset.valor))));
+          if (txt === null) return;
+          const nuevo = soloDigitos(txt);
+          if (!nuevo) return toast('Valor no válido');
+          if (nuevo === Math.round(Number(b.dataset.valor))) return toast('Es el mismo valor');
+          const { data: ok, error: e2 } = await sb.from('gastos').update({ valor: nuevo }).eq('id', b.dataset.corregir).select('id');
+          if (e2 || !ok?.length) return toast(e2 ? msgError(e2) : 'No se pudo guardar');
+          b.dataset.valor = nuevo;
+          b.closest('[data-id]').querySelector('[data-valor]').textContent = money(nuevo);
+          toast('Valor corregido');
+          cargarDatos();
+        }));
+      } catch (err) {
+        box.innerHTML = `<div class="card"><p class="note">${esc(err.message || String(err))}</p></div>`;
+      }
+    };
+    $('#c-buscar').addEventListener('click', buscar);
+    if (navigator.onLine) buscar();
   }
 };
 
