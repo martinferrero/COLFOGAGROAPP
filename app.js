@@ -153,6 +153,13 @@ async function ejecutar(item) {
     const { error } = await sb.storage.from('soportes').upload(item.path, item.blob, { upsert: true, contentType: item.blob.type || 'image/jpeg' });
     return error;
   }
+  if (item.op === 'upsert' && item.table === 'jornadas' && item.ignore) {
+    // Jornada compartida: si otro usuario ya la abrió, se ignora sin exigir que el piloto pueda verla
+    const { error } = await sb.rpc('abrir_jornada', { p_id: item.row.id, p_fecha: item.row.fecha });
+    if (!error) return null;
+    if (error.code !== 'PGRST202' && !/abrir_jornada/.test(error.message || '')) return error;
+    // Si la función aún no existe en la base, se usa el método anterior
+  }
   if (item.op === 'upsert') {
     const { error } = await sb.from(item.table).upsert(item.row, { onConflict: item.onConflict || 'id', ignoreDuplicates: !!item.ignore });
     return error;
