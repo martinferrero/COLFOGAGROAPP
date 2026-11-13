@@ -363,3 +363,104 @@ rutas.tablero = {
     wrap.addEventListener('pointerleave', () => (tip.hidden = true));
   }
 };
+
+/* ------------------------------------------------------------------ */
+/* Revisión de datos: ¿lo que se registró coincide con lo que se voló? */
+/* Compara las Ha por día de la app con las Ha que muestra la app DJI. */
+/* Muestra también lo que no cuenta (anulados, sin litros, días vacíos) */
+/* y el estado de subida de este celular.                              */
+/* ------------------------------------------------------------------ */
+const guardaLocal = {
+  get: (k) => { try { return localStorage.getItem(k); } catch { return null; } },
+  set: (k, v) => { try { v === '' ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch { /* sin almacenamiento */ } }
+};
+const diaCorto = (iso) => new Date(iso + 'T12:00:00').toLocaleDateString('es-CO', { weekday: 'short', day: 'numeric', month: 'short' });
+
+rutas.revision = {
+  titulo: 'Revisión de datos',
+  html: async (params) => {
+    if (!(esAdmin() || esConsulta())) return '<div class="card"><p class="muted">Esta opción es para COLFOG.</p></div>';
+    const per = params.periodo || 'mes';
+    const [desde, hasta] = rangoPeriodo(per);
+    const filtros = `<div class="filtros" role="group" aria-label="Periodo">${PERIODOS.map(([k, t]) => `<button class="pill ${k === per ? 'on' : ''}" data-rperiodo="${k}">${t}</button>`).join('')}</div>`;
+    if (!navigator.onLine) return filtros + '<div class="card"><p class="note">Necesitas señal para revisar los datos.</p></div>';
+    const { data, error } = await sb.from('jornadas').select('*, jornada_drones(*, trabajos(*))').gte('fecha', desde).lte('fecha', hasta).order('fecha', { ascending: false });
+    if (error) return filtros + `<div class="card"><p class="note">${esc(error.message)}</p></div>`;
+    const cola = await idb.all();
+
+    const dias = new Map();       // fecha -> { drones: {id: {ha, n}}, ha }
+    const anulados = [], sinLitros = [], vacios = [];
+    for (const j of data || []) {
+      const d = dias.get(j.fecha) || { drones: {}, ha: 0 };
+      dias.set(j.fecha, d);
+      for (const jd of j.jornada_drones || []) {
+        const x = (d.drones[jd.dron_id] ||= { ha: 0, n: 0 });
+        const ts = jd.trabajos || [];
+        if (!ts.length) vacios.push({ fecha: j.fecha, dron: jd.dron_id });
+        for (const t of ts) {
+          if (t.anulado) { anulados.push({ ...t, fecha: j.fecha, dron: jd.dron_id }); continue; }
+          x.ha += Number(t.ha); x.n++; d.ha += Number(t.ha);
+          if (t.tipo_servicio === 'aspersion' && t.litros_ha == null) sinLitros.push({ ...t, fecha: j.fecha, dron: jd.dron_id });
+        }
+      }
+    }
+    const fechas = [...dias.keys()];
+    const totalApp = fechas.reduce((s, f) => s + dias.get(f).ha, 0);
+    const porPersona = {};
+    for (const j of data || []) for (const jd of j.jornada_drones || []) for (const t of jd.trabajos || []) if (!t.anulado) {
+      const n = nombreDe(t.creado_por) || 'Sin nombre'; porPersona[n] = (porPersona[n] || 0) + Number(t.ha);
+    }
+
+    const estadoCel = cola.length
+      ? `<p class="note">Este celular tiene ${cola.length} registro(s) sin subir${cola.some((i) => i.error) ? ', con error' : ''}. Ábrelos en "Pendientes por subir".</p>`
+      : '<p class="muted">Este celular no tiene nada pendiente por subir. Los demás celulares se revisan en su propio "Pendientes por subir".</p>';
+
+    const filas = fechas.length ? fechas.map((f) => {
+      const d = dias.get(f);
+      const det = Object.entries(d.drones).map(([id, x]) => `${esc(id)} ${ha1(x.ha)}${x.n ? '' : ' (sin trabajos)'}`).join(' · ');
+      const dji = guardaLocal.get('dji:' + f) ?? '';
+      return `<li data-dia="${esc(f)}" data-app="${d.ha}"><div><div class="t">${esc(diaCorto(f))}</div><div class="muted">${det || 'Sin drones'}</div></div>
+        <div class="stack"><span class="badge">${ha1(d.ha)} Ha</span>
+        <input data-dji="${esc(f)}" inputmode="decimal" placeholder="DJI Ha" value="${esc(dji)}" style="width:92px;min-height:38px;padding:6px 8px">
+        <span class="muted" data-dif style="min-width:70px;text-align:right"></span></div></li>`;
+    }).join('') : '<li class="muted">No hay jornadas registradas en este periodo.</li>';
+
+    const lista = (arr, f) => arr.length ? `<ul class="list">${arr.map(f).join('')}</ul>` : '<p class="muted">Ninguno.</p>';
+    return `${filtros}
+      <div class="card"><h2>Subida de datos</h2>${estadoCel}
+        <p class="muted">En la base hay ${fechas.length} día(s) con jornada y <b>${ha1(totalApp)} Ha</b> registradas entre ${esc(desde)} y ${esc(hasta)}.</p>
+        <p class="muted">Por quién: ${Object.entries(porPersona).map(([n, h]) => `${esc(n)} ${ha1(h)} Ha`).join(' · ') || '—'}</p></div>
+      <div class="card"><h2>Ha por día: app vs. DJI</h2>
+        <p class="muted">Escribe, en cada día, las Ha que muestra la app DJI (Datos de la tarea). La diferencia aparece al lado. Si DJI tiene más Ha, ese día falta registrar trabajo.</p>
+        <ul class="list">${filas}</ul>
+        <p class="muted" id="rv-total"></p></div>
+      <div class="card"><h2>No cuentan en el tablero</h2>
+        <p class="muted"><b>Trabajos anulados</b> (${anulados.length}): se ocultan y no suman Ha ni ingresos.</p>
+        ${lista(anulados, (t) => `<li><div><div class="t">${esc(diaCorto(t.fecha))} · ${esc(t.dron)} · ${esc(t.cliente)} · ${ha1(Number(t.ha))} Ha</div><div class="muted">${esc(t.anulado_motivo || 'Sin motivo')} · anuló ${esc(nombreDe(t.anulado_por) || '—')}</div></div></li>`)}
+        <p class="muted"><b>Trabajos de aspersión sin litros por Ha</b> (${sinLitros.length}): suman Ha pero su ingreso es $0.</p>
+        ${lista(sinLitros, (t) => `<li><div><div class="t">${esc(diaCorto(t.fecha))} · ${esc(t.dron)} · ${esc(t.cliente)} · ${ha1(Number(t.ha))} Ha</div></div></li>`)}
+        <p class="muted"><b>Drones con jornada pero sin trabajos</b> (${vacios.length}): se abrió la jornada y no se registró el trabajo.</p>
+        ${lista(vacios, (v) => `<li><div><div class="t">${esc(diaCorto(v.fecha))} · ${esc(v.dron)}</div></div></li>`)}</div>`;
+  },
+  init: (params) => {
+    $$('[data-rperiodo]').forEach((b) => b.addEventListener('click', () => ir('revision', { periodo: b.dataset.rperiodo }, true)));
+    const pintar = () => {
+      let totApp = 0, totDji = 0, hayDji = false;
+      $$('[data-dia]').forEach((li) => {
+        const app = Number(li.dataset.app);
+        const inp = li.querySelector('[data-dji]');
+        const v = inp.value.trim() === '' ? null : Number(inp.value.replace(',', '.'));
+        const out = li.querySelector('[data-dif]');
+        totApp += app;
+        if (v == null || Number.isNaN(v)) { out.textContent = ''; out.style.color = ''; return; }
+        hayDji = true; totDji += v;
+        const dif = Math.round((app - v) * 100) / 100;
+        out.textContent = Math.abs(dif) < 0.1 ? '✓ igual' : `${dif > 0 ? '+' : ''}${ha1(dif)} Ha`;
+        out.style.color = Math.abs(dif) < 0.1 ? '' : (dif < 0 ? 'var(--danger, #b3261e)' : '#8a6d00');
+      });
+      $('#rv-total').textContent = hayDji ? `Con los días que escribiste de DJI: app ${ha1(totApp)} Ha vs. DJI ${ha1(totDji)} Ha.` : '';
+    };
+    $$('[data-dji]').forEach((i) => i.addEventListener('input', () => { guardaLocal.set('dji:' + i.dataset.dji, i.value.trim()); pintar(); }));
+    pintar();
+  }
+};

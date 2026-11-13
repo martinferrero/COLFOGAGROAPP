@@ -432,12 +432,14 @@ rutas.inicio = {
       </ul></div>` : ''}
       ${esAdmin() ? `<div class="card"><h2>Administración</h2><ul class="list">
         <li><div><div class="t">Gastos por aprobar</div><div class="muted">Revisa soportes del aliado y pilotos</div></div><button class="btn small" data-go="aprobaciones">${pendientes}</button></li>
+        <li><div><div class="t">Revisión de datos</div><div class="muted">Ha registradas vs. app DJI, anulados y pendientes</div></div><button class="btn small secondary" data-go="revision">Abrir</button></li>
         <li><div><div class="t">Cotejar gastos</div><div class="muted">Valor ingresado vs. foto del recibo</div></div><button class="btn small secondary" data-go="cotejar">Abrir</button></li>
         <li><div><div class="t">Importar gastos desde Excel</div><div class="muted">Carga o actualiza gastos completos (pólizas, administrativos…)</div></div><button class="btn small secondary" data-go="importar">Abrir</button></li>
         <li><div><div class="t">Posibles duplicados</div><div class="muted">Trabajos o gastos registrados dos veces</div></div><button class="btn small ${nDup ? '' : 'secondary'}" data-go="duplicados">${nDup}</button></li>
       </ul></div>` : ''}
       <div class="card"><h2>Registros</h2><ul class="list">
         <li><div><div class="t">Jornadas y trabajos</div><div class="muted">Últimos 45 días</div></div><button class="btn small secondary" data-go="registros">Ver</button></li>
+        ${esConsulta() ? '<li><div><div class="t">Revisión de datos</div><div class="muted">Ha registradas vs. app DJI</div></div><button class="btn small secondary" data-go="revision">Abrir</button></li>' : ''}
         ${esConsulta() ? '<li><div><div class="t">Cotejar gastos</div><div class="muted">Valor ingresado vs. foto del recibo</div></div><button class="btn small secondary" data-go="cotejar">Abrir</button></li>' : ''}
         <li><div><div class="t">Mis gastos</div><div class="muted">Estado de aprobación</div></div><button class="btn small secondary" data-go="gastos">Ver</button></li>
         ${'<li><div><div class="t">Pendientes por subir</div><div class="muted">Se suben solos al tener señal</div></div><button class="btn small secondary" data-go="cola">Ver</button></li>'}

@@ -3,5 +3,5 @@
 window.COLFOG_CONFIG = {
   SUPABASE_URL: 'https://qrevrehpaonhsvrjfrhs.supabase.co',
   SUPABASE_KEY: 'sb_publishable_p0njeGvtTf0AzTgDJOpOYA_G327i3WE',
-  APP_VERSION: '0.6.6'
+  APP_VERSION: '0.6.7'
 };
